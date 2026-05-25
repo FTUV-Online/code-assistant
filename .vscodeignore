@@ -1,0 +1,16 @@
+.vscode/**
+.vscode-test/**
+out/test/**
+src/**
+.gitignore
+**/tsconfig.json
+**/tsconfig.*.json
+test/**
+package-lock.json
+.gitignore
+**/.eslintrc.json
+**/*.map
+**/*.ts
+node_modules/**
+DESIGN.md
+ROADMAP.md

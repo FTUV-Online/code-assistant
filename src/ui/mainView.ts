@@ -1,0 +1,1040 @@
+import * as fs from 'fs';
+import * as path from 'path';
+import * as vscode from 'vscode';
+import { deleteApiKey, getApiKey, setApiKey } from '../config/secrets';
+import {
+  FEATURE_LIST,
+  SUPPORTED_OUTPUT_LANGUAGES,
+  getActiveProviderId,
+  getFeatures,
+  getIncludeFullFile,
+  getOutputLanguage,
+  getProviderConfigs,
+  isEnabled,
+  setActiveProviderId,
+  setEnabled,
+  setFeature,
+  setIncludeFullFile,
+  setOutputLanguage,
+  setProviderConfigs,
+  type FeatureName,
+  type FeaturesMap,
+} from '../config/settings';
+import { generateCommitMessage } from '../git/commitMessageGenerator';
+import { generatePrDescription } from '../git/prDescriptionGenerator';
+import { generateBranchNames } from '../git/branchNameGenerator';
+import { RepoManager } from '../git/repoManager';
+import { shortStatusLabel } from '../git/types';
+import type { RepoSummary } from '../git/types';
+import { AnthropicProvider } from '../providers/anthropic';
+import type { ProviderConfig } from '../providers/base';
+import * as log from '../util/logger';
+import {
+  ChatSession,
+  type ChatOutbound,
+  type HistoryEntry,
+  type HistorySummary,
+  type SessionKind,
+} from './chatSession';
+import type { McpManager } from '../mcp/manager';
+import type { McpServerSummary } from '../mcp/types';
+import type { SkillManager } from '../skills/manager';
+import type { SkillSummary } from '../skills/types';
+
+const HISTORY_KEY = 'devCode.chatHistory';
+const HISTORY_LIMIT = 50;
+
+type Inbound =
+  | { scope: 'meta'; type: 'ready' }
+  | { scope: 'meta'; type: 'showLogs' }
+  | { scope: 'tabs'; type: 'switch'; tab: string }
+  | { scope: 'tabs'; type: 'close'; tab: string }
+  | { scope: 'tabs'; type: 'newChat' }
+  | { scope: 'tabs'; type: 'togglePin'; tab: string }
+  | { scope: 'history'; type: 'list' }
+  | { scope: 'history'; type: 'resume'; entryId: string }
+  | { scope: 'history'; type: 'delete'; entryId: string }
+  | { scope: 'mcp'; type: 'list' }
+  | { scope: 'mcp'; type: 'reconnect' }
+  | { scope: 'skills'; type: 'list' }
+  | { scope: 'skills'; type: 'reload' }
+  | { scope: 'skills'; type: 'open'; filePath: string }
+  | {
+      scope: 'chat';
+      sessionId: string;
+      type: 'send';
+      text: string;
+      attachments?: Array<{ dataUrl: string; mediaType: string; label: string; sizeBytes: number }>;
+    }
+  | { scope: 'chat'; sessionId: string; type: 'stop' }
+  | { scope: 'chat'; sessionId: string; type: 'attachFile' }
+  | { scope: 'chat'; sessionId: string; type: 'attachFilePicker' }
+  | { scope: 'chat'; sessionId: string; type: 'attachImagePicker' }
+  | { scope: 'chat'; sessionId: string; type: 'setProvider'; providerId: string }
+  | { scope: 'chat'; sessionId: string; type: 'regenerate' }
+  | { scope: 'chat'; sessionId: string; type: 'export'; format: 'md' | 'json' }
+  | { scope: 'chat'; sessionId: string; type: 'clear' }
+  | { scope: 'chat'; sessionId: string; type: 'editMessage'; index: number; text: string }
+  | { scope: 'chat'; sessionId: string; type: 'attachFileByPath'; path: string; label: string }
+  | { scope: 'meta'; type: 'requestFileList'; query: string; requestId: string }
+  | { scope: 'config'; type: 'addProvider'; config: ProviderConfig; apiKey?: string }
+  | { scope: 'config'; type: 'updateProvider'; config: ProviderConfig; apiKey?: string }
+  | { scope: 'config'; type: 'deleteProvider'; id: string }
+  | { scope: 'config'; type: 'activateProvider'; id: string }
+  | { scope: 'config'; type: 'toggleEnabled' }
+  | { scope: 'config'; type: 'testConnection'; config: ProviderConfig; apiKey?: string }
+  | { scope: 'config'; type: 'setOutputLanguage'; language: string }
+  | { scope: 'config'; type: 'setIncludeFullFile'; value: boolean }
+  | { scope: 'config'; type: 'setFeatureEnabled'; feature: FeatureName; value: boolean }
+  | { scope: 'config'; type: 'setFeatureProvider'; feature: FeatureName; providerId: string }
+  | { scope: 'git'; type: 'selectRepo'; repoId: string }
+  | { scope: 'git'; type: 'stage'; repoId: string; paths: string[] }
+  | { scope: 'git'; type: 'unstage'; repoId: string; paths: string[] }
+  | { scope: 'git'; type: 'stageAll'; repoId: string }
+  | { scope: 'git'; type: 'unstageAll'; repoId: string }
+  | { scope: 'git'; type: 'commit'; repoId: string; message: string }
+  | { scope: 'git'; type: 'generateMessage'; repoId: string }
+  | { scope: 'git'; type: 'generatePrDescription'; repoId: string; baseBranch: string }
+  | { scope: 'git'; type: 'generateBranchName'; repoId: string; intent: string }
+  | { scope: 'git'; type: 'openFile'; path: string }
+  | { scope: 'git'; type: 'openDiff'; repoId: string; path: string; staged: boolean }
+  | { scope: 'git'; type: 'discard'; repoId: string; path: string }
+  | { scope: 'git'; type: 'explainChange'; repoId: string; path: string; relPath: string; staged: boolean }
+  | { scope: 'git'; type: 'reviewChange'; repoId: string; path: string; relPath: string; staged: boolean }
+  | { scope: 'git'; type: 'rescan' };
+
+type Outbound =
+  | { scope: 'meta'; type: 'init'; version: string }
+  | { scope: 'meta'; type: 'toast'; message: string; kind: 'info' | 'error' | 'success' }
+  | {
+      scope: 'meta';
+      type: 'fileList';
+      requestId: string;
+      files: { path: string; name: string }[];
+    }
+  | {
+      scope: 'config';
+      type: 'state';
+      providers: ProviderConfig[];
+      activeId: string;
+      enabled: boolean;
+      apiKeyStatus: Record<string, boolean>;
+      outputLanguage: string;
+      supportedLanguages: readonly string[];
+      includeFullFile: boolean;
+      features: FeaturesMap;
+      featureList: typeof FEATURE_LIST;
+    }
+  | { scope: 'config'; type: 'testResult'; success: boolean; message: string }
+  | {
+      scope: 'git';
+      type: 'state';
+      hasGit: boolean;
+      loading: boolean;
+      repos: SerializedRepo[];
+      activeRepoId: string;
+    }
+  | { scope: 'git'; type: 'commitMessage'; text: string }
+  | { scope: 'git'; type: 'prDescription'; text: string; branch: string; baseBranch: string }
+  | { scope: 'git'; type: 'branchSuggestions'; names: string[] }
+  | { scope: 'git'; type: 'busy'; busy: boolean; label?: string }
+  | {
+      scope: 'tabs';
+      type: 'state';
+      tabs: { id: string; label: string; kind: string; closable: boolean; pinned: boolean }[];
+      activeTab: string;
+    }
+  | { scope: 'history'; type: 'list'; entries: HistorySummary[] }
+  | { scope: 'mcp'; type: 'state'; servers: McpServerSummary[] }
+  | { scope: 'skills'; type: 'state'; skills: SkillSummary[] }
+  | ({ scope: 'chat' } & ChatOutbound);
+
+type SerializedRepo = {
+  id: string;
+  rootPath: string;
+  rootName: string;
+  branch: string | null;
+  ahead: number;
+  behind: number;
+  staged: SerializedChange[];
+  unstaged: SerializedChange[];
+  merge: SerializedChange[];
+};
+
+type SerializedChange = {
+  path: string;
+  relPath: string;
+  status: string;
+  statusLabel: string;
+  staged: boolean;
+};
+
+export class MainViewProvider implements vscode.WebviewViewProvider {
+  public static readonly viewType = 'devCode.mainView';
+  private view?: vscode.WebviewView;
+  private activeRepoId = '';
+  private generateAbort: AbortController | null = null;
+  private chatSessions: Map<string, ChatSession> = new Map();
+  private sessionOrder: string[] = [];
+  private activeTab = 'git';
+  private sessionCounter = 0;
+  private hasEnsuredDefaultChat = false;
+  private pinnedSessions: Set<string> = new Set();
+
+  constructor(
+    private readonly context: vscode.ExtensionContext,
+    private readonly repoManager: RepoManager,
+    private readonly mcpManager?: McpManager,
+    private readonly skillManager?: SkillManager,
+  ) {
+    this.context.subscriptions.push(this.repoManager.onDidChange(() => this.postGitState()));
+    if (this.mcpManager) {
+      this.context.subscriptions.push(this.mcpManager.onChange(() => this.postMcpState()));
+    }
+    if (this.skillManager) {
+      this.context.subscriptions.push(this.skillManager.onChange(() => this.postSkillsState()));
+    }
+  }
+
+  resolveWebviewView(view: vscode.WebviewView): void {
+    this.view = view;
+    const version = this.context.extension.packageJSON.version ?? '';
+    if (version) view.description = `v${version}`;
+    view.webview.options = {
+      enableScripts: true,
+      localResourceRoots: [vscode.Uri.joinPath(this.context.extensionUri, 'media')],
+    };
+    view.webview.html = this.renderHtml(view.webview);
+    view.webview.onDidReceiveMessage((msg: Inbound) => {
+      this.handleMessage(msg).catch((err) => {
+        const m = err instanceof Error ? err.message : String(err);
+        log.error('mainView handler', err);
+        this.post({ scope: 'meta', type: 'toast', message: m, kind: 'error' });
+      });
+    });
+    this.ensureDefaultChat();
+  }
+
+  refresh(): void {
+    void this.postConfigState();
+    void this.postGitState();
+  }
+
+  private renderHtml(webview: vscode.Webview): string {
+    const htmlPath = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'mainView.html');
+    const raw = fs.readFileSync(htmlPath.fsPath, 'utf8');
+    const nonce = makeNonce();
+    return raw.replace(/{{nonce}}/g, nonce).replace(/{{cspSource}}/g, webview.cspSource);
+  }
+
+  private async handleMessage(msg: Inbound): Promise<void> {
+    if (msg.scope === 'meta') return this.handleMeta(msg);
+    if (msg.scope === 'config') return this.handleConfig(msg);
+    if (msg.scope === 'git') return this.handleGit(msg);
+    if (msg.scope === 'tabs') return this.handleTabs(msg);
+    if (msg.scope === 'chat') return this.handleChat(msg);
+    if (msg.scope === 'history') return this.handleHistory(msg);
+    if (msg.scope === 'mcp') return this.handleMcp(msg);
+    if (msg.scope === 'skills') return this.handleSkills(msg);
+  }
+
+  private async handleSkills(msg: Inbound & { scope: 'skills' }): Promise<void> {
+    if (!this.skillManager) return;
+    if (msg.type === 'list') {
+      this.postSkillsState();
+      return;
+    }
+    if (msg.type === 'reload') {
+      await this.skillManager.reload();
+      return;
+    }
+    if (msg.type === 'open') {
+      try {
+        const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(msg.filePath));
+        await vscode.window.showTextDocument(doc);
+      } catch (err) {
+        log.error('open skill file failed', err);
+      }
+      return;
+    }
+  }
+
+  private postSkillsState(): void {
+    if (!this.skillManager) {
+      this.post({ scope: 'skills', type: 'state', skills: [] });
+      return;
+    }
+    this.post({ scope: 'skills', type: 'state', skills: this.skillManager.getSummaries() });
+  }
+
+  private async handleMcp(msg: Inbound & { scope: 'mcp' }): Promise<void> {
+    if (!this.mcpManager) return;
+    if (msg.type === 'list') {
+      this.postMcpState();
+      return;
+    }
+    if (msg.type === 'reconnect') {
+      await this.mcpManager.reconnect();
+      return;
+    }
+  }
+
+  private postMcpState(): void {
+    if (!this.mcpManager) {
+      this.post({ scope: 'mcp', type: 'state', servers: [] });
+      return;
+    }
+    this.post({ scope: 'mcp', type: 'state', servers: this.mcpManager.getServerSummaries() });
+  }
+
+  private handleTabs(msg: Inbound & { scope: 'tabs' }): void {
+    if (msg.type === 'switch') {
+      this.activeTab = msg.tab;
+      this.postTabsState();
+    } else if (msg.type === 'close') {
+      if (msg.tab.startsWith('chat:')) {
+        const id = msg.tab.slice('chat:'.length);
+        if (this.pinnedSessions.has(id)) {
+          // Cannot close pinned tabs
+          return;
+        }
+        const sess = this.chatSessions.get(id);
+        if (sess) {
+          // Save snapshot to history if it has content.
+          if (sess.hasContent()) void this.saveHistorySnapshot(sess.toHistoryEntry());
+          sess.dispose();
+          this.chatSessions.delete(id);
+          this.sessionOrder = this.sessionOrder.filter((s) => s !== id);
+        }
+        if (this.activeTab === msg.tab) {
+          // Fall back to last session or git tab
+          const lastSession = this.sessionOrder[this.sessionOrder.length - 1];
+          this.activeTab = lastSession ? `chat:${lastSession}` : 'git';
+        }
+        this.postTabsState();
+      }
+    } else if (msg.type === 'newChat') {
+      this.openNewChat();
+    } else if (msg.type === 'togglePin') {
+      if (msg.tab.startsWith('chat:')) {
+        const id = msg.tab.slice('chat:'.length);
+        if (this.pinnedSessions.has(id)) this.pinnedSessions.delete(id);
+        else this.pinnedSessions.add(id);
+        this.postTabsState();
+      }
+    }
+  }
+
+  private async handleHistory(msg: Inbound & { scope: 'history' }): Promise<void> {
+    if (msg.type === 'list') {
+      this.postHistoryList();
+      return;
+    }
+    if (msg.type === 'resume') {
+      const entries = this.loadHistory();
+      const entry = entries.find((e) => e.id === msg.entryId);
+      if (!entry) return;
+
+      const activeSess = this.getActiveChatSession();
+      if (activeSess && activeSess.sessionKind === 'chat' && !activeSess.hasContent()) {
+        // Empty chat tab → load into it
+        activeSess.loadFromHistory(entry);
+      } else {
+        // Create new tab
+        const id = this.createChatTab();
+        const sess = this.chatSessions.get(id);
+        if (sess) sess.loadFromHistory(entry);
+      }
+      this.postTabsState();
+      return;
+    }
+    if (msg.type === 'delete') {
+      const entries = this.loadHistory().filter((e) => e.id !== msg.entryId);
+      await this.context.workspaceState.update(HISTORY_KEY, entries);
+      this.postHistoryList();
+      return;
+    }
+  }
+
+  private getActiveChatSession(): ChatSession | null {
+    if (!this.activeTab.startsWith('chat:')) return null;
+    return this.chatSessions.get(this.activeTab.slice('chat:'.length)) ?? null;
+  }
+
+  // ---- Tab / session creation ----
+
+  openNewChat(): string {
+    return this.createChatTab();
+  }
+
+  private createChatTab(): string {
+    this.sessionCounter++;
+    const id = `s${Date.now().toString(36)}${this.sessionCounter}`;
+    const sess = new ChatSession(
+      id,
+      'chat',
+      '',
+      '',
+      this.context,
+      (payload) => {
+        if (payload.type === 'doneAssistant') {
+          const s = this.chatSessions.get(id);
+          if (s && s.hasContent()) void this.saveHistorySnapshot(s.toHistoryEntry());
+        }
+        this.post({ scope: 'chat', ...payload } as Outbound);
+      },
+      () => this.postTabsState(),
+    );
+    this.chatSessions.set(id, sess);
+    this.sessionOrder.push(id);
+    this.activeTab = `chat:${id}`;
+    sess.startChat();
+    this.postTabsState();
+    return id;
+  }
+
+  private ensureDefaultChat(): void {
+    if (this.hasEnsuredDefaultChat) return;
+    this.hasEnsuredDefaultChat = true;
+    if (this.sessionOrder.length === 0) {
+      this.createChatTab();
+    }
+  }
+
+  // ---- History persistence ----
+
+  private loadHistory(): HistoryEntry[] {
+    return this.context.workspaceState.get<HistoryEntry[]>(HISTORY_KEY, []);
+  }
+
+  private async saveHistorySnapshot(entry: HistoryEntry): Promise<void> {
+    let history = this.loadHistory().filter((e) => e.id !== entry.id);
+    history.unshift(entry);
+    history = history.slice(0, HISTORY_LIMIT);
+    await this.context.workspaceState.update(HISTORY_KEY, history);
+    this.postHistoryList();
+  }
+
+  private postHistoryList(): void {
+    const entries = this.loadHistory();
+    const summaries: HistorySummary[] = entries.map((e) => ({
+      id: e.id,
+      title: e.title,
+      kind: e.kind,
+      fileLabel: e.fileLabel,
+      messageCount: e.messages.length,
+      updatedAt: e.updatedAt,
+    }));
+    this.post({ scope: 'history', type: 'list', entries: summaries });
+  }
+
+  private async handleChat(msg: Inbound & { scope: 'chat' }): Promise<void> {
+    const sess = this.chatSessions.get(msg.sessionId);
+    if (!sess) {
+      log.warn('chat message for unknown session', { id: msg.sessionId });
+      return;
+    }
+    if (msg.type === 'send') await sess.handleUserMessage(msg.text, msg.attachments ?? []);
+    else if (msg.type === 'stop') sess.cancelStream();
+    else if (msg.type === 'attachFile') await sess.attachFile();
+    else if (msg.type === 'attachFilePicker') await this.showAttachFilePicker(sess);
+    else if (msg.type === 'attachImagePicker') await this.showAttachImagePicker(sess);
+    else if (msg.type === 'setProvider') sess.setProvider(msg.providerId);
+    else if (msg.type === 'regenerate') await sess.regenerateLast();
+    else if (msg.type === 'export') await this.exportSession(sess, msg.format);
+    else if (msg.type === 'clear') sess.clearMessages();
+    else if (msg.type === 'editMessage') await sess.editAndResend(msg.index, msg.text);
+    else if (msg.type === 'attachFileByPath') {
+      let abs = msg.path;
+      const ws = vscode.workspace.workspaceFolders?.[0];
+      if (ws && !path.isAbsolute(msg.path)) {
+        abs = vscode.Uri.joinPath(ws.uri, msg.path).fsPath;
+      }
+      await sess.attachFile({ filePath: abs, fileLabel: msg.label });
+    }
+  }
+
+  private async handleFileListRequest(query: string, requestId: string): Promise<void> {
+    const exclude =
+      '{**/node_modules/**,**/.git/**,**/dist/**,**/out/**,**/build/**,**/target/**,**/.next/**,**/.cache/**,**/.venv/**,**/venv/**}';
+    let files: vscode.Uri[];
+    try {
+      files = await vscode.workspace.findFiles('**/*', exclude, 2000);
+    } catch {
+      this.post({ scope: 'meta', type: 'fileList', requestId, files: [] });
+      return;
+    }
+    const q = query.toLowerCase();
+    const items = files
+      .map((uri) => {
+        const rel = vscode.workspace.asRelativePath(uri).replace(/\\/g, '/');
+        const name = rel.split('/').pop() || rel;
+        return { path: rel, name };
+      })
+      .filter((f) => !q || f.name.toLowerCase().includes(q) || f.path.toLowerCase().includes(q))
+      .sort((a, b) => {
+        const an = a.name.toLowerCase();
+        const bn = b.name.toLowerCase();
+        if (q) {
+          const ai = an.startsWith(q) ? 0 : an.includes(q) ? 1 : 2;
+          const bi = bn.startsWith(q) ? 0 : bn.includes(q) ? 1 : 2;
+          if (ai !== bi) return ai - bi;
+        }
+        return an.localeCompare(bn);
+      })
+      .slice(0, 30);
+    this.post({ scope: 'meta', type: 'fileList', requestId, files: items });
+  }
+
+  private async exportSession(sess: ChatSession, format: 'md' | 'json'): Promise<void> {
+    const data = format === 'md' ? sess.toMarkdown() : sess.toJson();
+    const title = sess.getTitle().replace(/[^a-zA-Z0-9-_]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 50) || 'chat';
+    const ext = format === 'md' ? '.md' : '.json';
+    const defaultFileName = `${title}-${Date.now()}${ext}`;
+    const ws = vscode.workspace.workspaceFolders?.[0];
+    const defaultUri = ws ? vscode.Uri.joinPath(ws.uri, defaultFileName) : vscode.Uri.file(defaultFileName);
+    const filters: Record<string, string[]> =
+      format === 'md' ? { Markdown: ['md'] } : { JSON: ['json'] };
+    const uri = await vscode.window.showSaveDialog({ defaultUri, filters, saveLabel: 'Export' });
+    if (!uri) return;
+    try {
+      await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(data));
+      this.post({
+        scope: 'meta',
+        type: 'toast',
+        message: `Exported to ${vscode.workspace.asRelativePath(uri)}`,
+        kind: 'success',
+      });
+    } catch (err) {
+      const m = err instanceof Error ? err.message : String(err);
+      this.post({ scope: 'meta', type: 'toast', message: 'Export failed: ' + m, kind: 'error' });
+    }
+  }
+
+  private async showAttachImagePicker(sess: ChatSession): Promise<void> {
+    const uris = await vscode.window.showOpenDialog({
+      canSelectMany: true,
+      filters: { Images: ['png', 'jpg', 'jpeg', 'gif', 'webp'] },
+      title: 'Attach image(s) to chat',
+      openLabel: 'Attach',
+    });
+    if (!uris || uris.length === 0) return;
+    for (const uri of uris) {
+      await sess.attachImageFromPath(uri.fsPath);
+    }
+  }
+
+  private async showAttachFilePicker(sess: ChatSession): Promise<void> {
+    const exclude =
+      '{**/node_modules/**,**/.git/**,**/dist/**,**/out/**,**/build/**,**/target/**,**/.next/**,**/.cache/**,**/.venv/**,**/venv/**}';
+    let files: vscode.Uri[];
+    try {
+      files = await vscode.workspace.findFiles('**/*', exclude, 5000);
+    } catch (err) {
+      log.error('findFiles', err);
+      this.post({
+        scope: 'meta',
+        type: 'toast',
+        message: 'Failed to list workspace files.',
+        kind: 'error',
+      });
+      return;
+    }
+    if (files.length === 0) {
+      this.post({
+        scope: 'meta',
+        type: 'toast',
+        message: 'No files found in workspace.',
+        kind: 'info',
+      });
+      return;
+    }
+    const items = files.map((uri) => {
+      const relative = vscode.workspace.asRelativePath(uri);
+      const segments = relative.replace(/\\/g, '/').split('/');
+      const name = segments[segments.length - 1];
+      const dir = segments.slice(0, -1).join('/');
+      return {
+        label: name,
+        description: dir,
+        detail: relative,
+        uri,
+      };
+    });
+    const picked = await vscode.window.showQuickPick(items, {
+      title: 'Attach a file to this chat',
+      placeHolder: 'Type to filter workspace files…',
+      matchOnDescription: true,
+      matchOnDetail: true,
+    });
+    if (picked) {
+      await sess.attachFile({ filePath: picked.uri.fsPath, fileLabel: picked.detail });
+    }
+  }
+
+  // Public API for editor commands / git tab to open a chat tab
+  async openDiffAnalysis(
+    kind: SessionKind,
+    diff: string,
+    fileLabel: string,
+    filePath: string,
+  ): Promise<void> {
+    const id = this.createSession(kind, fileLabel, filePath);
+    const sess = this.chatSessions.get(id);
+    if (!sess) return;
+    this.activeTab = `chat:${id}`;
+    this.postTabsState();
+    await sess.startDiffAnalysis(diff);
+  }
+
+  async openCodeAnalysis(
+    kind: SessionKind,
+    code: string,
+    languageId: string,
+    fileLabel: string,
+    filePath: string,
+    rangeLabel: string,
+  ): Promise<void> {
+    const id = this.createSession(kind, fileLabel, filePath);
+    const sess = this.chatSessions.get(id);
+    if (!sess) return;
+    this.activeTab = `chat:${id}`;
+    this.postTabsState();
+    await sess.startCodeAnalysis(code, languageId, rangeLabel);
+  }
+
+  private createSession(kind: SessionKind, fileLabel: string, filePath: string): string {
+    this.sessionCounter++;
+    const id = `s${Date.now().toString(36)}${this.sessionCounter}`;
+    const sess = new ChatSession(
+      id,
+      kind,
+      fileLabel,
+      filePath,
+      this.context,
+      (payload) => {
+        // Auto-save snapshot every time assistant finishes a turn.
+        if (payload.type === 'doneAssistant') {
+          const s = this.chatSessions.get(id);
+          if (s && s.hasContent()) void this.saveHistorySnapshot(s.toHistoryEntry());
+        }
+        this.post({ scope: 'chat', ...payload } as Outbound);
+      },
+      () => this.postTabsState(),
+    );
+    this.chatSessions.set(id, sess);
+    this.sessionOrder.push(id);
+    return id;
+  }
+
+  private postTabsState(): void {
+    const tabs = [
+      { id: 'git', label: 'Git', kind: 'git', closable: false, pinned: false },
+      { id: 'config', label: 'Config', kind: 'config', closable: false, pinned: false },
+    ];
+    for (const id of this.sessionOrder) {
+      const s = this.chatSessions.get(id);
+      if (s) {
+        const pinned = this.pinnedSessions.has(id);
+        tabs.push({
+          id: `chat:${id}`,
+          label: s.getTitle(),
+          kind: s.kind,
+          closable: !pinned,
+          pinned,
+        });
+      }
+    }
+    this.post({ scope: 'tabs', type: 'state', tabs, activeTab: this.activeTab });
+  }
+
+  private async handleMeta(msg: Inbound & { scope: 'meta' }): Promise<void> {
+    if (msg.type === 'ready') {
+      this.post({
+        scope: 'meta',
+        type: 'init',
+        version: this.context.extension.packageJSON.version ?? '',
+      });
+      await this.postConfigState();
+      await this.postGitState();
+      this.postTabsState();
+      this.postHistoryList();
+      this.postMcpState();
+      this.postSkillsState();
+      return;
+    }
+    if (msg.type === 'showLogs') {
+      log.show();
+      return;
+    }
+    if (msg.type === 'requestFileList') {
+      await this.handleFileListRequest(msg.query, msg.requestId);
+      return;
+    }
+  }
+
+  private async handleConfig(msg: Inbound & { scope: 'config' }): Promise<void> {
+    switch (msg.type) {
+      case 'addProvider':
+      case 'updateProvider': {
+        validateConfig(msg.config);
+        const others = getProviderConfigs().filter((c) => c.id !== msg.config.id);
+        await setProviderConfigs([...others, msg.config]);
+        if (typeof msg.apiKey === 'string' && msg.apiKey.length > 0) {
+          await setApiKey(this.context, msg.config.id, msg.apiKey);
+        }
+        if (!getActiveProviderId()) {
+          await setActiveProviderId(msg.config.id);
+        }
+        await this.postConfigState();
+        this.post({
+          scope: 'meta',
+          type: 'toast',
+          message: `Provider "${msg.config.id}" saved.`,
+          kind: 'success',
+        });
+        return;
+      }
+      case 'deleteProvider': {
+        const remaining = getProviderConfigs().filter((c) => c.id !== msg.id);
+        await setProviderConfigs(remaining);
+        await deleteApiKey(this.context, msg.id);
+        if (getActiveProviderId() === msg.id) {
+          await setActiveProviderId(remaining[0]?.id ?? '');
+        }
+        await this.postConfigState();
+        this.post({
+          scope: 'meta',
+          type: 'toast',
+          message: `Provider "${msg.id}" removed.`,
+          kind: 'info',
+        });
+        return;
+      }
+      case 'activateProvider':
+        await setActiveProviderId(msg.id);
+        await this.postConfigState();
+        return;
+      case 'toggleEnabled':
+        await setEnabled(!isEnabled());
+        await this.postConfigState();
+        return;
+      case 'testConnection':
+        await this.testConnection(msg.config, msg.apiKey);
+        return;
+      case 'setOutputLanguage':
+        await setOutputLanguage(msg.language);
+        await this.postConfigState();
+        return;
+      case 'setIncludeFullFile':
+        await setIncludeFullFile(msg.value);
+        await this.postConfigState();
+        return;
+      case 'setFeatureEnabled':
+        await setFeature(msg.feature, { enabled: msg.value });
+        await this.postConfigState();
+        return;
+      case 'setFeatureProvider':
+        await setFeature(msg.feature, { providerId: msg.providerId });
+        await this.postConfigState();
+        return;
+    }
+  }
+
+  private async handleGit(msg: Inbound & { scope: 'git' }): Promise<void> {
+    switch (msg.type) {
+      case 'selectRepo':
+        this.activeRepoId = msg.repoId;
+        await this.postGitState();
+        return;
+      case 'stage':
+        await this.repoManager.stage(msg.repoId, msg.paths);
+        return;
+      case 'unstage':
+        await this.repoManager.unstage(msg.repoId, msg.paths);
+        return;
+      case 'stageAll':
+        await this.repoManager.stageAll(msg.repoId);
+        return;
+      case 'unstageAll':
+        await this.repoManager.unstageAll(msg.repoId);
+        return;
+      case 'commit':
+        await this.repoManager.commit(msg.repoId, msg.message);
+        this.post({ scope: 'meta', type: 'toast', message: 'Committed.', kind: 'success' });
+        this.post({ scope: 'git', type: 'commitMessage', text: '' });
+        return;
+      case 'generateMessage':
+        await this.handleGenerate(msg.repoId);
+        return;
+      case 'generatePrDescription':
+        await this.handleGeneratePrDescription(msg.repoId, msg.baseBranch);
+        return;
+      case 'generateBranchName':
+        await this.handleGenerateBranchName(msg.repoId, msg.intent);
+        return;
+      case 'openFile':
+        await vscode.window.showTextDocument(vscode.Uri.file(msg.path));
+        return;
+      case 'openDiff':
+        await vscode.commands.executeCommand('git.openChange', vscode.Uri.file(msg.path));
+        return;
+      case 'discard':
+        await this.repoManager.discard(msg.repoId, msg.path);
+        this.post({ scope: 'meta', type: 'toast', message: 'Changes discarded.', kind: 'info' });
+        return;
+      case 'explainChange':
+        await this.analyseChange('explain', msg.repoId, msg.path, msg.relPath, msg.staged);
+        return;
+      case 'reviewChange':
+        await this.analyseChange('review', msg.repoId, msg.path, msg.relPath, msg.staged);
+        return;
+      case 'rescan':
+        await this.repoManager.rescan();
+        return;
+    }
+  }
+
+  private async analyseChange(
+    kind: 'explain' | 'review',
+    repoId: string,
+    filePath: string,
+    relPath: string,
+    staged: boolean,
+  ): Promise<void> {
+    const diff = await this.repoManager.getFileDiff(repoId, filePath, staged);
+    if (!diff.trim()) {
+      this.post({
+        scope: 'meta',
+        type: 'toast',
+        message: 'No diff for this file (already up to date with HEAD).',
+        kind: 'info',
+      });
+      return;
+    }
+    await this.openDiffAnalysis(kind, diff, relPath || filePath, filePath);
+  }
+
+  private async handleGeneratePrDescription(repoId: string, baseBranch: string): Promise<void> {
+    this.generateAbort?.abort();
+    const ctrl = new AbortController();
+    this.generateAbort = ctrl;
+    try {
+      this.post({ scope: 'git', type: 'busy', busy: true, label: 'Computing diff vs base...' });
+      const { diff, commitLog, branch, baseBranch: base } =
+        await this.repoManager.getDiffAgainstBase(repoId, baseBranch);
+      if (!diff.trim() && !commitLog.trim()) {
+        this.post({
+          scope: 'meta',
+          type: 'toast',
+          message: 'No commits or diff between HEAD and ' + base + '.',
+          kind: 'error',
+        });
+        return;
+      }
+      this.post({ scope: 'git', type: 'busy', busy: true, label: 'Generating PR description...' });
+      const text = await generatePrDescription(
+        this.context,
+        { diff, commitLog, branch, baseBranch: base },
+        ctrl.signal,
+      );
+      this.post({ scope: 'git', type: 'prDescription', text, branch, baseBranch: base });
+    } catch (err) {
+      const m = err instanceof Error ? err.message : String(err);
+      this.post({ scope: 'meta', type: 'toast', message: m, kind: 'error' });
+    } finally {
+      this.post({ scope: 'git', type: 'busy', busy: false });
+    }
+  }
+
+  private async handleGenerateBranchName(repoId: string, intent: string): Promise<void> {
+    this.generateAbort?.abort();
+    const ctrl = new AbortController();
+    this.generateAbort = ctrl;
+    try {
+      this.post({ scope: 'git', type: 'busy', busy: true, label: 'Looking at changes...' });
+      let diff = '';
+      try {
+        diff = await this.repoManager.getStagedDiff(repoId);
+      } catch {}
+      if (!diff.trim()) {
+        try {
+          diff = await this.repoManager.getUnstagedDiff(repoId);
+        } catch {}
+      }
+      this.post({ scope: 'git', type: 'busy', busy: true, label: 'Suggesting branch names...' });
+      const names = await generateBranchNames(this.context, { diff, intent }, ctrl.signal);
+      if (names.length === 0) {
+        this.post({
+          scope: 'meta',
+          type: 'toast',
+          message: 'No usable branch names came back. Try giving an intent description.',
+          kind: 'error',
+        });
+        return;
+      }
+      this.post({ scope: 'git', type: 'branchSuggestions', names });
+    } catch (err) {
+      const m = err instanceof Error ? err.message : String(err);
+      this.post({ scope: 'meta', type: 'toast', message: m, kind: 'error' });
+    } finally {
+      this.post({ scope: 'git', type: 'busy', busy: false });
+    }
+  }
+
+  private async handleGenerate(repoId: string): Promise<void> {
+    this.generateAbort?.abort();
+    const ctrl = new AbortController();
+    this.generateAbort = ctrl;
+    try {
+      const diff = await this.repoManager.getStagedDiff(repoId);
+      if (!diff.trim()) {
+        this.post({
+          scope: 'meta',
+          type: 'toast',
+          message: 'No staged changes. Stage some files first.',
+          kind: 'error',
+        });
+        return;
+      }
+      this.post({ scope: 'git', type: 'busy', busy: true, label: 'Generating commit message...' });
+      const text = await generateCommitMessage(this.context, diff, ctrl.signal);
+      this.post({ scope: 'git', type: 'commitMessage', text });
+    } catch (err) {
+      const m = err instanceof Error ? err.message : String(err);
+      this.post({ scope: 'meta', type: 'toast', message: m, kind: 'error' });
+    } finally {
+      this.post({ scope: 'git', type: 'busy', busy: false });
+    }
+  }
+
+  private async testConnection(config: ProviderConfig, apiKeyOverride?: string): Promise<void> {
+    log.info('test connection', {
+      id: config.id,
+      protocol: config.protocol,
+      baseURL: config.baseURL,
+      model: config.model,
+    });
+    if (config.protocol !== 'anthropic') {
+      this.post({
+        scope: 'config',
+        type: 'testResult',
+        success: false,
+        message: `Protocol "${config.protocol}" is not implemented yet.`,
+      });
+      return;
+    }
+    const apiKey = apiKeyOverride || (await getApiKey(this.context, config.id));
+    const testConfig: ProviderConfig = { ...config, maxTokens: 1 };
+    const provider = new AnthropicProvider(config.id, testConfig, apiKey);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
+    try {
+      const iter = provider.complete(
+        { prefix: 'hello', suffix: '', language: 'plaintext' },
+        controller.signal,
+      );
+      for await (const _ of iter) {
+        break;
+      }
+      log.info('test connection OK');
+      this.post({ scope: 'config', type: 'testResult', success: true, message: 'Connection OK.' });
+    } catch (err) {
+      const m = err instanceof Error ? err.message : String(err);
+      log.error('test connection failed', err);
+      this.post({ scope: 'config', type: 'testResult', success: false, message: m });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private async postConfigState(): Promise<void> {
+    if (!this.view) return;
+    const providers = getProviderConfigs();
+    const apiKeyStatus: Record<string, boolean> = {};
+    for (const c of providers) {
+      const key = await getApiKey(this.context, c.id);
+      apiKeyStatus[c.id] = !!key;
+    }
+    this.post({
+      scope: 'config',
+      type: 'state',
+      providers,
+      activeId: getActiveProviderId(),
+      enabled: isEnabled(),
+      apiKeyStatus,
+      outputLanguage: getOutputLanguage(),
+      supportedLanguages: SUPPORTED_OUTPUT_LANGUAGES,
+      includeFullFile: getIncludeFullFile(),
+      features: getFeatures(),
+      featureList: FEATURE_LIST,
+    });
+  }
+
+  private async postGitState(): Promise<void> {
+    if (!this.view) return;
+    const repos = this.repoManager.listRepos();
+    if (!this.activeRepoId && repos.length > 0) {
+      this.activeRepoId = repos[0].id;
+    } else if (this.activeRepoId && !repos.find((r) => r.id === this.activeRepoId)) {
+      this.activeRepoId = repos[0]?.id ?? '';
+    }
+    this.post({
+      scope: 'git',
+      type: 'state',
+      hasGit: this.repoManager.hasGit(),
+      loading: this.repoManager.loading,
+      repos: repos.map(serializeRepo),
+      activeRepoId: this.activeRepoId,
+    });
+  }
+
+  private post(payload: Outbound): void {
+    this.view?.webview.postMessage(payload);
+  }
+}
+
+function validateConfig(c: ProviderConfig): void {
+  if (!/^[a-zA-Z0-9_-]+$/.test(c.id)) {
+    throw new Error('Provider ID must contain only letters, digits, "-" and "_".');
+  }
+  if (!c.baseURL.startsWith('http://') && !c.baseURL.startsWith('https://')) {
+    throw new Error('Base URL must start with http:// or https://');
+  }
+  if (!c.model.trim()) {
+    throw new Error('Model is required.');
+  }
+}
+
+function serializeRepo(r: RepoSummary): SerializedRepo {
+  return {
+    id: r.id,
+    rootPath: r.rootPath,
+    rootName: r.rootName,
+    branch: r.branch,
+    ahead: r.ahead,
+    behind: r.behind,
+    staged: r.staged.map(serializeChange),
+    unstaged: r.unstaged.map(serializeChange),
+    merge: r.merge.map(serializeChange),
+  };
+}
+
+function serializeChange(c: { path: string; relPath: string; status: string; staged: boolean }): SerializedChange {
+  return {
+    path: c.path,
+    relPath: c.relPath,
+    status: c.status,
+    statusLabel: shortStatusLabel(c.status as any),
+    staged: c.staged,
+  };
+}
+
+function makeNonce(): string {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  let nonce = '';
+  for (let i = 0; i < 32; i++) {
+    nonce += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return nonce;
+}
