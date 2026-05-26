@@ -1,6 +1,7 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
 import * as log from '../util/logger';
+import { parseBranchList } from './branchListParser';
 import { gitAdd, gitCheckoutFile, gitCleanFile, gitReset, gitRun } from './gitCli';
 import {
   FileChange,
@@ -299,6 +300,33 @@ export class RepoManager {
       log.warn('log against base failed', { repoId, base: resolvedBase, err: String(err) });
     }
     return { diff, commitLog, branch, baseBranch: resolvedBase };
+  }
+
+  async listBranches(repoId: string): Promise<string[]> {
+    const repo = this.getRepo(repoId);
+    if (!repo) throw new Error('Repository not found.');
+    const cwd = repo.rootUri.fsPath;
+    try {
+      const raw = await gitRun(cwd, ['branch', '--no-color', '-a', '--format=%(refname:short)']);
+      return parseBranchList(raw);
+    } catch {
+      // fallback to just local branches
+      try {
+        const raw = await gitRun(cwd, ['branch', '--no-color', '--format=%(refname:short)']);
+        return parseBranchList(raw);
+      } catch {
+        return [];
+      }
+    }
+  }
+
+  async checkoutBranch(repoId: string, branch: string): Promise<void> {
+    const repo = this.getRepo(repoId);
+    if (!repo) throw new Error('Repository not found.');
+    if (!branch.trim()) throw new Error('Branch name is required.');
+    const cwd = repo.rootUri.fsPath;
+    await gitRun(cwd, ['checkout', branch.trim()]);
+    this._onDidChange.fire();
   }
 
   async getUnstagedDiff(repoId: string): Promise<string> {

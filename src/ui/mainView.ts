@@ -95,6 +95,8 @@ type Inbound =
   | { scope: 'git'; type: 'commit'; repoId: string; message: string }
   | { scope: 'git'; type: 'generateMessage'; repoId: string }
   | { scope: 'git'; type: 'generatePrDescription'; repoId: string; baseBranch: string }
+  | { scope: 'git'; type: 'listBranches'; repoId: string }
+  | { scope: 'git'; type: 'checkoutBranch'; repoId: string; branch: string }
   | { scope: 'git'; type: 'generateBranchName'; repoId: string; intent: string }
   | { scope: 'git'; type: 'openFile'; path: string }
   | { scope: 'git'; type: 'openDiff'; repoId: string; path: string; staged: boolean }
@@ -137,6 +139,7 @@ type Outbound =
   | { scope: 'git'; type: 'commitMessage'; text: string }
   | { scope: 'git'; type: 'prDescription'; text: string; branch: string; baseBranch: string }
   | { scope: 'git'; type: 'branchSuggestions'; names: string[] }
+  | { scope: 'git'; type: 'branches'; branches: string[] }
   | { scope: 'git'; type: 'busy'; busy: boolean; label?: string }
   | {
       scope: 'tabs';
@@ -770,6 +773,12 @@ export class MainViewProvider implements vscode.WebviewViewProvider {
       case 'generatePrDescription':
         await this.handleGeneratePrDescription(msg.repoId, msg.baseBranch);
         return;
+      case 'listBranches':
+        await this.handleListBranches(msg.repoId);
+        return;
+      case 'checkoutBranch':
+        await this.handleCheckoutBranch(msg.repoId, msg.branch);
+        return;
       case 'generateBranchName':
         await this.handleGenerateBranchName(msg.repoId, msg.intent);
         return;
@@ -844,6 +853,26 @@ export class MainViewProvider implements vscode.WebviewViewProvider {
       this.post({ scope: 'meta', type: 'toast', message: m, kind: 'error' });
     } finally {
       this.post({ scope: 'git', type: 'busy', busy: false });
+    }
+  }
+
+  private async handleListBranches(repoId: string): Promise<void> {
+    try {
+      const branches = await this.repoManager.listBranches(repoId);
+      this.post({ scope: 'git', type: 'branches', branches });
+    } catch (err) {
+      const m = err instanceof Error ? err.message : String(err);
+      this.post({ scope: 'meta', type: 'toast', message: m, kind: 'error' });
+    }
+  }
+
+  private async handleCheckoutBranch(repoId: string, branch: string): Promise<void> {
+    try {
+      await this.repoManager.checkoutBranch(repoId, branch);
+      this.post({ scope: 'meta', type: 'toast', message: 'Switched to ' + branch, kind: 'success' });
+    } catch (err) {
+      const m = err instanceof Error ? err.message : String(err);
+      this.post({ scope: 'meta', type: 'toast', message: m, kind: 'error' });
     }
   }
 
