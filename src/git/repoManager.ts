@@ -329,6 +329,17 @@ export class RepoManager {
     this._onDidChange.fire();
   }
 
+  async getRemoteUrl(repoId: string): Promise<string> {
+    const repo = this.getRepo(repoId);
+    if (!repo) throw new Error('Repository not found.');
+    const cwd = repo.rootUri.fsPath;
+    try {
+      return (await gitRun(cwd, ['remote', 'get-url', 'origin'])).trim();
+    } catch {
+      return '';
+    }
+  }
+
   async getUnstagedDiff(repoId: string): Promise<string> {
     const repo = this.getRepo(repoId);
     if (!repo) throw new Error('Repository not found.');

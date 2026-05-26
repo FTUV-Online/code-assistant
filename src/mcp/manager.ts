@@ -1,16 +1,20 @@
 import type { ToolDef } from '../providers/base';
 import * as log from '../util/logger';
 import { McpClient } from './client';
-import type { McpServerSummary } from './types';
+import type { McpServerConfig, McpServerSummary } from './types';
 
 const PREFIX = 'mcp__';
 
 export class McpManager {
   private clients = new Map<string, McpClient>();
   private readonly listeners = new Set<() => void>();
+  private disabledTools: Record<string, string[]> = {};
 
   /** Reload server configuration. Disconnects removed servers, adds new ones. */
-  async configure(servers: Record<string, { command: string; args?: string[]; env?: Record<string, string> }>): Promise<void> {
+  async configure(
+    servers: Record<string, McpServerConfig>,
+    tokens?: Record<string, string>,
+  ): Promise<void> {
     const wantedNames = new Set(Object.keys(servers));
     // Remove servers no longer wanted
     for (const [name, client] of this.clients) {
@@ -22,7 +26,7 @@ export class McpManager {
     // Add new servers (don't reconnect existing ones whose config hasn't changed — simple impl: keep)
     for (const [name, cfg] of Object.entries(servers)) {
       if (!this.clients.has(name)) {
-        this.clients.set(name, new McpClient(name, cfg));
+        this.clients.set(name, new McpClient(name, cfg, tokens?.[name]));
       }
     }
     this.notify();
@@ -56,7 +60,9 @@ export class McpManager {
     const out: ToolDef[] = [];
     for (const client of this.clients.values()) {
       if (client.status !== 'connected') continue;
+      const disabled = new Set(this.disabledTools[client.name] ?? []);
       for (const tool of client.tools) {
+        if (disabled.has(tool.name)) continue;
         const safeServer = sanitize(client.name);
         const safeTool = sanitize(tool.name);
         const fullName = `${PREFIX}${safeServer}__${safeTool}`;
@@ -133,9 +139,18 @@ export class McpManager {
     }
   }
 
+  setDisabledTools(tools: Record<string, string[]>): void {
+    this.disabledTools = tools;
+  }
+
+  buildToolName(serverName: string, toolName: string): string {
+    return `${PREFIX}${sanitize(serverName)}__${sanitize(toolName)}`;
+  }
+
   getServerSummaries(): McpServerSummary[] {
     return [...this.clients.values()].map((c) => ({
       name: c.name,
+      transport: c.config.transport,
       status: c.status,
       toolCount: c.tools.length,
       tools: c.toolSummaries(),

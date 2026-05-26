@@ -23,3 +23,27 @@ export function deleteApiKey(
 ): Thenable<void> {
   return context.secrets.delete(`${KEY_PREFIX}${providerId}`);
 }
+
+const MCP_TOKEN_PREFIX = 'devCode.mcpToken.';
+
+export function getMcpToken(
+  context: vscode.ExtensionContext,
+  serverName: string,
+): Thenable<string | undefined> {
+  return context.secrets.get(`${MCP_TOKEN_PREFIX}${serverName}`);
+}
+
+export function setMcpToken(
+  context: vscode.ExtensionContext,
+  serverName: string,
+  token: string,
+): Thenable<void> {
+  return context.secrets.store(`${MCP_TOKEN_PREFIX}${serverName}`, token);
+}
+
+export function deleteMcpToken(
+  context: vscode.ExtensionContext,
+  serverName: string,
+): Thenable<void> {
+  return context.secrets.delete(`${MCP_TOKEN_PREFIX}${serverName}`);
+}

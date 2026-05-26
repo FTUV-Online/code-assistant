@@ -1,5 +1,8 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { WebSocketClientTransport } from '@modelcontextprotocol/sdk/client/websocket.js';
+import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import * as log from '../util/logger';
 import type { McpServerConfig, McpServerStatus, McpToolSummary } from './types';
 
@@ -11,12 +14,16 @@ export type RemoteTool = {
 
 export class McpClient {
   private client: Client | null = null;
-  private transport: StdioClientTransport | null = null;
+  private transport: Transport | null = null;
   private _status: McpServerStatus = 'idle';
   private _tools: RemoteTool[] = [];
   private _error: string | undefined;
 
-  constructor(public readonly name: string, public readonly config: McpServerConfig) {}
+  constructor(
+    public readonly name: string,
+    public readonly config: McpServerConfig,
+    public readonly token?: string,
+  ) {}
 
   get status(): McpServerStatus {
     return this._status;
@@ -33,25 +40,46 @@ export class McpClient {
     this._status = 'connecting';
     this._error = undefined;
     try {
-      const env: Record<string, string> = {};
-      for (const [k, v] of Object.entries(process.env)) {
-        if (typeof v === 'string') env[k] = v;
+      if (this.config.transport === 'stdio') {
+        const env: Record<string, string> = {};
+        for (const [k, v] of Object.entries(process.env)) {
+          if (typeof v === 'string') env[k] = v;
+        }
+        Object.assign(env, this.config.env ?? {});
+        this.transport = new StdioClientTransport({
+          command: this.config.command,
+          args: this.config.args ?? [],
+          env,
+        });
+      } else if (this.config.transport === 'streamable-http') {
+        const opts: Record<string, unknown> = {};
+        const headers: Record<string, string> = { ...this.config.headers };
+        if (this.token && !headers.Authorization && !headers.authorization) {
+          headers.Authorization = `Bearer ${this.token}`;
+        }
+        if (Object.keys(headers).length > 0) {
+          opts.requestInit = { headers };
+        }
+        this.transport = new StreamableHTTPClientTransport(
+          new URL(this.config.url),
+          opts,
+        );
+      } else if (this.config.transport === 'websocket') {
+        this.transport = new WebSocketClientTransport(
+          new URL(this.config.url),
+        );
       }
-      Object.assign(env, this.config.env ?? {});
-
-      this.transport = new StdioClientTransport({
-        command: this.config.command,
-        args: this.config.args ?? [],
-        env,
-      });
 
       this.client = new Client(
         { name: 'dev-code', version: '0.1.5' },
         { capabilities: {} },
       );
 
-      log.info('mcp: connecting', { server: this.name, command: this.config.command });
-      await this.client.connect(this.transport);
+      log.info('mcp: connecting', {
+        server: this.name,
+        transport: this.config.transport,
+      });
+      await this.client.connect(this.transport!);
 
       const result = await this.client.listTools();
       this._tools = (result.tools ?? []).map((t: any) => ({

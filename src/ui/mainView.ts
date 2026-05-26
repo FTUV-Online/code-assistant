@@ -1,13 +1,14 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { deleteApiKey, getApiKey, setApiKey } from '../config/secrets';
+import { deleteApiKey, deleteMcpToken, getApiKey, getMcpToken, setApiKey, setMcpToken } from '../config/secrets';
 import {
   FEATURE_LIST,
   SUPPORTED_OUTPUT_LANGUAGES,
   getActiveProviderId,
   getFeatures,
   getIncludeFullFile,
+  getMcpDisabledTools,
   getOutputLanguage,
   getProviderConfigs,
   isEnabled,
@@ -15,6 +16,7 @@ import {
   setEnabled,
   setFeature,
   setIncludeFullFile,
+  setMcpDisabledTools,
   setOutputLanguage,
   setProviderConfigs,
   type FeatureName,
@@ -38,6 +40,7 @@ import {
 } from './chatSession';
 import type { McpManager } from '../mcp/manager';
 import type { McpServerSummary } from '../mcp/types';
+import type { McpServerConfigSetting } from '../config/settings';
 import type { SkillManager } from '../skills/manager';
 import type { SkillSummary } from '../skills/types';
 
@@ -56,6 +59,11 @@ type Inbound =
   | { scope: 'history'; type: 'delete'; entryId: string }
   | { scope: 'mcp'; type: 'list' }
   | { scope: 'mcp'; type: 'reconnect' }
+  | { scope: 'mcp'; type: 'addServer'; name: string; config: McpServerConfigSetting; target: 'global' | 'workspace'; token?: string }
+  | { scope: 'mcp'; type: 'updateServer'; name: string; config: McpServerConfigSetting; target: 'global' | 'workspace'; token?: string }
+  | { scope: 'mcp'; type: 'deleteServer'; name: string; target: 'global' | 'workspace' }
+  | { scope: 'mcp'; type: 'toggleTool'; server: string; tool: string }
+  | { scope: 'mcp'; type: 'getConfig' }
   | { scope: 'skills'; type: 'list' }
   | { scope: 'skills'; type: 'reload' }
   | { scope: 'skills'; type: 'open'; filePath: string }
@@ -95,6 +103,7 @@ type Inbound =
   | { scope: 'git'; type: 'commit'; repoId: string; message: string }
   | { scope: 'git'; type: 'generateMessage'; repoId: string }
   | { scope: 'git'; type: 'generatePrDescription'; repoId: string; baseBranch: string }
+  | { scope: 'git'; type: 'createPr'; repoId: string; serverName: string; toolName: string; prefixedName: string; title: string; body: string; head: string; base: string }
   | { scope: 'git'; type: 'listBranches'; repoId: string }
   | { scope: 'git'; type: 'checkoutBranch'; repoId: string; branch: string }
   | { scope: 'git'; type: 'generateBranchName'; repoId: string; intent: string }
@@ -137,7 +146,7 @@ type Outbound =
       activeRepoId: string;
     }
   | { scope: 'git'; type: 'commitMessage'; text: string }
-  | { scope: 'git'; type: 'prDescription'; text: string; branch: string; baseBranch: string }
+  | { scope: 'git'; type: 'prDescription'; text: string; branch: string; baseBranch: string; createPrTool?: { serverName: string; toolName: string; prefixedName: string } }
   | { scope: 'git'; type: 'branchSuggestions'; names: string[] }
   | { scope: 'git'; type: 'branches'; branches: string[] }
   | { scope: 'git'; type: 'busy'; busy: boolean; label?: string }
@@ -148,7 +157,8 @@ type Outbound =
       activeTab: string;
     }
   | { scope: 'history'; type: 'list'; entries: HistorySummary[] }
-  | { scope: 'mcp'; type: 'state'; servers: McpServerSummary[] }
+  | { scope: 'mcp'; type: 'state'; servers: McpServerSummary[]; disabledTools: Record<string, string[]> }
+  | { scope: 'mcp'; type: 'config'; servers: Record<string, McpServerConfigSetting>; configScope: 'global' | 'workspace'; tokenStatus: Record<string, boolean> }
   | { scope: 'skills'; type: 'state'; skills: SkillSummary[] }
   | ({ scope: 'chat' } & ChatOutbound);
 
@@ -280,14 +290,105 @@ export class MainViewProvider implements vscode.WebviewViewProvider {
       await this.mcpManager.reconnect();
       return;
     }
+    if (msg.type === 'getConfig') {
+      const config = vscode.workspace.getConfiguration('devCode');
+      const raw = config.get<Record<string, McpServerConfigSetting>>('mcp.servers') ?? {};
+      const inspected = config.inspect<Record<string, McpServerConfigSetting>>('mcp.servers');
+      const configScope = inspected?.workspaceValue ? 'workspace' : 'global';
+      const tokenStatus: Record<string, boolean> = {};
+      for (const name of Object.keys(raw)) {
+        tokenStatus[name] = !!(await getMcpToken(this.context, name));
+      }
+      this.post({ scope: 'mcp', type: 'config', servers: raw, configScope, tokenStatus });
+      return;
+    }
+    if (msg.type === 'addServer' || msg.type === 'updateServer') {
+      try {
+        const target = msg.target === 'workspace'
+          ? vscode.ConfigurationTarget.Workspace
+          : vscode.ConfigurationTarget.Global;
+        const config = vscode.workspace.getConfiguration('devCode');
+        const servers = config.get<Record<string, McpServerConfigSetting>>('mcp.servers') ?? {};
+        servers[msg.name] = msg.config;
+        await config.update('mcp.servers', servers, target);
+        if (msg.token !== undefined) {
+          if (msg.token.length > 0) {
+            await setMcpToken(this.context, msg.name, msg.token);
+          } else {
+            await deleteMcpToken(this.context, msg.name);
+          }
+        }
+        this.post({ scope: 'meta', type: 'toast', message: `MCP server "${msg.name}" saved.`, kind: 'success' });
+      } catch (err) {
+        const m = err instanceof Error ? err.message : String(err);
+        this.post({ scope: 'meta', type: 'toast', message: m, kind: 'error' });
+      }
+      return;
+    }
+    if (msg.type === 'toggleTool') {
+      try {
+        const current = getMcpDisabledTools();
+        const disabled = new Set(current[msg.server] ?? []);
+        if (disabled.has(msg.tool)) {
+          disabled.delete(msg.tool);
+        } else {
+          disabled.add(msg.tool);
+        }
+        current[msg.server] = [...disabled];
+        if (current[msg.server].length === 0) delete current[msg.server];
+        await setMcpDisabledTools(current);
+        if (this.mcpManager) {
+          this.mcpManager.setDisabledTools(current);
+        }
+        this.postMcpState();
+      } catch (err) {
+        const m = err instanceof Error ? err.message : String(err);
+        this.post({ scope: 'meta', type: 'toast', message: m, kind: 'error' });
+      }
+      return;
+    }
+    if (msg.type === 'deleteServer') {
+      try {
+        const target = msg.target === 'workspace'
+          ? vscode.ConfigurationTarget.Workspace
+          : vscode.ConfigurationTarget.Global;
+        const config = vscode.workspace.getConfiguration('devCode');
+        const servers = config.get<Record<string, McpServerConfigSetting>>('mcp.servers') ?? {};
+        delete servers[msg.name];
+        await config.update('mcp.servers', servers, target);
+        await deleteMcpToken(this.context, msg.name);
+        this.post({ scope: 'meta', type: 'toast', message: `MCP server "${msg.name}" removed.`, kind: 'success' });
+      } catch (err) {
+        const m = err instanceof Error ? err.message : String(err);
+        this.post({ scope: 'meta', type: 'toast', message: m, kind: 'error' });
+      }
+      return;
+    }
   }
 
   private postMcpState(): void {
     if (!this.mcpManager) {
-      this.post({ scope: 'mcp', type: 'state', servers: [] });
+      this.post({ scope: 'mcp', type: 'state', servers: [], disabledTools: {} });
       return;
     }
-    this.post({ scope: 'mcp', type: 'state', servers: this.mcpManager.getServerSummaries() });
+    const summaries = this.mcpManager.getServerSummaries();
+    const config = vscode.workspace.getConfiguration('devCode');
+    const inspected = config.inspect<Record<string, McpServerConfigSetting>>('mcp.servers');
+    const globalVal = inspected?.globalValue ?? {};
+    const workspaceVal = inspected?.workspaceValue ?? {};
+    for (const s of summaries) {
+      if (workspaceVal && s.name in workspaceVal) {
+        s.configScope = 'workspace';
+      } else if (globalVal && s.name in globalVal) {
+        s.configScope = 'global';
+      }
+    }
+    this.post({
+      scope: 'mcp',
+      type: 'state',
+      servers: summaries,
+      disabledTools: getMcpDisabledTools(),
+    });
   }
 
   private handleTabs(msg: Inbound & { scope: 'tabs' }): void {
@@ -773,6 +874,12 @@ export class MainViewProvider implements vscode.WebviewViewProvider {
       case 'generatePrDescription':
         await this.handleGeneratePrDescription(msg.repoId, msg.baseBranch);
         return;
+      case 'createPr':
+        await this.handleCreatePr(
+          msg.repoId, msg.serverName, msg.toolName, msg.prefixedName,
+          msg.title, msg.body, msg.head, msg.base,
+        );
+        return;
       case 'listBranches':
         await this.handleListBranches(msg.repoId);
         return;
@@ -847,10 +954,64 @@ export class MainViewProvider implements vscode.WebviewViewProvider {
         { diff, commitLog, branch, baseBranch: base },
         ctrl.signal,
       );
-      this.post({ scope: 'git', type: 'prDescription', text, branch, baseBranch: base });
+      const createPrTool = this.findPrCreationTool();
+      this.post({ scope: 'git', type: 'prDescription', text, branch, baseBranch: base, createPrTool: createPrTool || undefined });
     } catch (err) {
       const m = err instanceof Error ? err.message : String(err);
       this.post({ scope: 'meta', type: 'toast', message: m, kind: 'error' });
+    } finally {
+      this.post({ scope: 'git', type: 'busy', busy: false });
+    }
+  }
+
+  private findPrCreationTool(): { serverName: string; toolName: string; prefixedName: string } | null {
+    if (!this.mcpManager) return null;
+    const prPatterns = ['create_pull_request', 'create_pr', 'create_merge_request'];
+    for (const s of this.mcpManager.getServerSummaries()) {
+      if (s.status !== 'connected') continue;
+      for (const t of s.tools) {
+        const lower = t.name.toLowerCase();
+        if (prPatterns.some((p) => lower.includes(p))) {
+          return {
+            serverName: s.name,
+            toolName: t.name,
+            prefixedName: this.mcpManager.buildToolName(s.name, t.name),
+          };
+        }
+      }
+    }
+    return null;
+  }
+
+  private async handleCreatePr(
+    repoId: string,
+    serverName: string,
+    toolName: string,
+    prefixedName: string,
+    title: string,
+    body: string,
+    head: string,
+    base: string,
+  ): Promise<void> {
+    this.post({ scope: 'git', type: 'busy', busy: true, label: 'Creating PR...' });
+    try {
+      if (!this.mcpManager) throw new Error('No MCP manager available.');
+      const remoteUrl = await this.repoManager.getRemoteUrl(repoId);
+      const ownerRepo = extractOwnerRepo(remoteUrl);
+      const args: Record<string, unknown> = { title, body, head, base };
+      if (ownerRepo.owner) args.owner = ownerRepo.owner;
+      if (ownerRepo.repo) args.repo = ownerRepo.repo;
+
+      const result = await this.mcpManager.executeTool(prefixedName, args);
+      if (result.isError) {
+        this.post({ scope: 'meta', type: 'toast', message: 'PR creation failed: ' + result.content, kind: 'error' });
+      } else {
+        const url = extractUrl(result.content);
+        this.post({ scope: 'meta', type: 'toast', message: url ? `PR created: ${url}` : 'PR created successfully.', kind: 'success' });
+      }
+    } catch (err) {
+      const m = err instanceof Error ? err.message : String(err);
+      this.post({ scope: 'meta', type: 'toast', message: 'PR creation failed: ' + m, kind: 'error' });
     } finally {
       this.post({ scope: 'git', type: 'busy', busy: false });
     }
@@ -1066,4 +1227,18 @@ function makeNonce(): string {
     nonce += chars.charAt(Math.floor(Math.random() * chars.length));
   }
   return nonce;
+}
+
+function extractOwnerRepo(url: string): { owner?: string; repo?: string } {
+  if (!url) return {};
+  const sshMatch = url.match(/git@[^:]+:([^/]+)\/([^.]+)(?:\.git)?$/);
+  if (sshMatch) return { owner: sshMatch[1], repo: sshMatch[2] };
+  const httpsMatch = url.match(/https?:\/\/[^/]+\/([^/]+)\/([^.]+)(?:\.git)?$/);
+  if (httpsMatch) return { owner: httpsMatch[1], repo: httpsMatch[2] };
+  return {};
+}
+
+function extractUrl(text: string): string | null {
+  const match = text.match(/https?:\/\/[^\s]+/);
+  return match ? match[0] : null;
 }

@@ -1,7 +1,8 @@
 import * as vscode from 'vscode';
 import { registerEditorCommands } from './commands/editorCommands';
 import { DevCodeInlineProvider } from './completion/inlineProvider';
-import { getMcpServers } from './config/settings';
+import { getMcpToken } from './config/secrets';
+import { getMcpDisabledTools, getMcpServers } from './config/settings';
 import { DevCodeActionProvider } from './editor/codeActionProvider';
 import { DevCodeLensProvider } from './editor/codeLensProvider';
 import { RepoManager } from './git/repoManager';
@@ -12,6 +13,29 @@ import { MainViewProvider } from './ui/mainView';
 import { registerSetupWizard } from './ui/setupWizard';
 import { createStatusBar } from './ui/statusBar';
 import * as log from './util/logger';
+
+async function readMcpTokens(
+  context: vscode.ExtensionContext,
+  serverNames: string[],
+): Promise<Record<string, string>> {
+  const tokens: Record<string, string> = {};
+  for (const name of serverNames) {
+    const token = await getMcpToken(context, name);
+    if (token) tokens[name] = token;
+  }
+  return tokens;
+}
+
+async function reconfigureMcp(
+  context: vscode.ExtensionContext,
+  mcpManager: McpManager,
+): Promise<void> {
+  const servers = getMcpServers();
+  const tokens = await readMcpTokens(context, Object.keys(servers));
+  mcpManager.setDisabledTools(getMcpDisabledTools());
+  await mcpManager.configure(servers, tokens);
+  await mcpManager.connectAll();
+}
 
 export function activate(context: vscode.ExtensionContext): void {
   log.initLogger(context);
@@ -45,10 +69,7 @@ export function activate(context: vscode.ExtensionContext): void {
   setMcpManager(mcpManager);
   context.subscriptions.push({ dispose: () => void mcpManager.dispose() });
   // Configure + connect in background.
-  void mcpManager
-    .configure(getMcpServers())
-    .then(() => mcpManager.connectAll())
-    .catch((err) => log.error('mcp init failed', err));
+  void reconfigureMcp(context, mcpManager).catch((err) => log.error('mcp init failed', err));
 
   const mainView = new MainViewProvider(context, repoManager, mcpManager, skillManager);
   context.subscriptions.push(
@@ -74,10 +95,9 @@ export function activate(context: vscode.ExtensionContext): void {
         mainView.refresh();
       }
       if (e.affectsConfiguration('devCode.mcp.servers')) {
-        void mcpManager
-          .configure(getMcpServers())
-          .then(() => mcpManager.connectAll())
-          .catch((err) => log.error('mcp reconfigure failed', err));
+        void reconfigureMcp(context, mcpManager).catch((err) =>
+          log.error('mcp reconfigure failed', err),
+        );
       }
     }),
   );

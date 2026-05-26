@@ -1,4 +1,6 @@
 import * as vscode from 'vscode';
+import { normalizeMcpServers } from '../mcp/types';
+import type { McpServerConfig, McpServerConfigSetting } from '../mcp/types';
 import type { ProviderConfig } from '../providers/base';
 
 const NS = 'devCode';
@@ -72,16 +74,29 @@ const DEFAULT_TOOL_BLACKLIST_SETTING = [
   '.kube/config',
 ];
 
-export type McpServerConfigSetting = {
-  command: string;
-  args?: string[];
-  env?: Record<string, string>;
-};
+export type { McpServerConfigSetting } from '../mcp/types';
 
-export function getMcpServers(): Record<string, McpServerConfigSetting> {
+export function getMcpServers(): Record<string, McpServerConfig> {
   const raw = vscode.workspace.getConfiguration(NS).get<Record<string, McpServerConfigSetting>>('mcp.servers');
-  if (raw && typeof raw === 'object') return raw;
+  return normalizeMcpServers(raw);
+}
+
+export function getMcpDisabledTools(): Record<string, string[]> {
+  const v = vscode.workspace.getConfiguration(NS).get<Record<string, string[]>>('mcp.disabledTools');
+  if (v && typeof v === 'object' && !Array.isArray(v)) {
+    const clean: Record<string, string[]> = {};
+    for (const [server, tools] of Object.entries(v)) {
+      if (Array.isArray(tools)) clean[server] = tools.filter((t) => typeof t === 'string');
+    }
+    return clean;
+  }
   return {};
+}
+
+export async function setMcpDisabledTools(value: Record<string, string[]>): Promise<void> {
+  await vscode.workspace
+    .getConfiguration(NS)
+    .update('mcp.disabledTools', value, vscode.ConfigurationTarget.Global);
 }
 
 export function getAllowWriteTools(): boolean {

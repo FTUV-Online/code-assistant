@@ -267,7 +267,7 @@
     font-size: 11px;
   }
   .ai-output-title { font-weight: 600; }
-  .ai-output-meta { opacity: 0.6; font-size: 10px; flex: 1; }
+  .ai-output-meta { opacity: 0.6; font-size: 10px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .ai-output textarea { min-height: 140px; }
   .branch-intent { margin-bottom: 6px; font-size: 11px; }
   #branchSuggestItems { list-style: none; padding: 0; margin: 0; }
@@ -681,11 +681,18 @@
   .feature-row.disabled .name,
   .feature-row.disabled select { opacity: 0.5; }
 
+  .mcp-server { margin-bottom: 2px; }
   .mcp-row {
     display: flex; align-items: center; gap: 8px;
     padding: 5px 0;
     font-size: 12px;
+    cursor: pointer;
+    border-radius: 3px;
+    padding: 5px 4px;
   }
+  .mcp-row:hover { background: var(--vscode-list-hoverBackground); }
+  .mcp-row .arrow { opacity: 0.5; font-size: 8px; flex-shrink: 0; transition: transform 0.15s; }
+  .mcp-server.open .mcp-row .arrow { transform: rotate(90deg); }
   .mcp-row .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
   .mcp-row .dot.connected { background: #3fb950; }
   .mcp-row .dot.connecting { background: #d29922; animation: pulse 1s ease-in-out infinite; }
@@ -695,6 +702,55 @@
   .mcp-row .name { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
   .mcp-row .meta { font-size: 10px; opacity: 0.65; }
   .mcp-row .meta.error-text { color: #f85149; opacity: 1; }
+  .mcp-row .transport-pill {
+    font-size: 9px;
+    padding: 0px 5px;
+    border-radius: 6px;
+    background: var(--vscode-badge-background);
+    color: var(--vscode-badge-foreground);
+    flex-shrink: 0;
+  }
+  .mcp-row .scope-pill {
+    font-size: 9px;
+    padding: 0px 5px;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--vscode-foreground);
+    opacity: 0.55;
+    border: 1px solid var(--vscode-panel-border);
+    flex-shrink: 0;
+  }
+  .mcp-tools {
+    display: none;
+    padding: 2px 0 6px 28px;
+    font-size: 12px;
+  }
+  .mcp-server.open .mcp-tools { display: block; }
+  .mcp-tool-item {
+    padding: 4px 6px;
+    border-radius: 3px;
+    display: flex; align-items: baseline; gap: 6px;
+  }
+  .mcp-tool-item:hover { background: var(--vscode-list-hoverBackground); }
+  .mcp-tool-item input[type="checkbox"] {
+    width: auto;
+    flex-shrink: 0;
+    margin: 0;
+    accent-color: var(--vscode-focusBorder);
+  }
+  .mcp-tool-item .t-name {
+    font-family: var(--vscode-editor-font-family, monospace);
+    font-weight: 600;
+    color: #c586c0;
+    flex-shrink: 0;
+    font-size: 11px;
+  }
+  .mcp-tool-item .t-desc {
+    opacity: 0.7;
+    font-size: 11px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    flex: 1;
+  }
   .mcp-empty {
     opacity: 0.5; font-size: 11px;
     padding: 6px 0;
@@ -702,6 +758,40 @@
   .mcp-help {
     font-size: 10px; opacity: 0.6;
     padding: 4px 0;
+  }
+  #mcpFormContainer {
+    margin-top: 10px;
+    border: 1px solid var(--vscode-panel-border, transparent);
+    border-radius: 4px;
+    padding: 10px;
+    background: var(--vscode-editorWidget-background, transparent);
+  }
+  #mcpFormContainer h2 { font-size: 13px; margin: 0 0 8px 0; }
+  #mcpForm {
+    display: flex; flex-direction: column; gap: 6px;
+    font-size: 12px;
+  }
+  #mcpForm label { font-size: 11px; opacity: 0.7; }
+  #mcpForm input, #mcpForm textarea, #mcpForm select {
+    font-family: inherit; font-size: 12px;
+    background: var(--vscode-input-background);
+    color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-input-border, transparent);
+    padding: 4px 6px; border-radius: 2px;
+  }
+  #mcpForm textarea { resize: vertical; min-height: 36px; }
+  #mcpForm .form-actions {
+    display: flex; gap: 6px; justify-content: flex-end; margin-top: 4px;
+  }
+  #mcpForm .form-actions button {
+    padding: 4px 12px; border-radius: 2px; border: 1px solid var(--vscode-panel-border);
+    font-family: inherit; font-size: 12px; cursor: pointer;
+    background: var(--vscode-button-secondaryBackground);
+    color: var(--vscode-button-secondaryForeground);
+  }
+  #mcpForm .form-actions button[type="submit"] {
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
   }
 
   .skill-row {
@@ -1286,11 +1376,69 @@
         <span class="arrow">▶</span>
         <span class="title">MCP Servers</span>
         <span class="actions">
+          <button id="mcpAddBtn" class="icon-btn tiny" type="button" title="Add MCP server">+</button>
           <button id="mcpReconnectBtn" class="icon-btn tiny" type="button" title="Reconnect all MCP servers">↻</button>
         </span>
       </div>
       <div class="config-section-body">
         <div id="mcpList"></div>
+        <div id="mcpFormContainer" style="display: none;">
+          <h2 id="mcpFormTitle">Add MCP Server</h2>
+          <form id="mcpForm" autocomplete="off">
+            <input type="hidden" id="mcp-f-edit-name" value="">
+            <label for="mcp-f-name">Server name *</label>
+            <input id="mcp-f-name" type="text" placeholder="my-server" required>
+
+            <label for="mcp-f-transport">Transport</label>
+            <select id="mcp-f-transport" data-cs="1">
+              <option value="stdio">stdio (local process)</option>
+              <option value="streamable-http">streamable-http (remote HTTP+SSE)</option>
+              <option value="websocket">websocket (remote WS)</option>
+            </select>
+
+            <label for="mcp-f-scope">Scope</label>
+            <select id="mcp-f-scope" data-cs="1">
+              <option value="global">Global (all workspaces)</option>
+              <option value="workspace">Workspace (this folder only)</option>
+            </select>
+
+            <div id="mcp-stdio-fields">
+              <label for="mcp-f-command">Command *</label>
+              <input id="mcp-f-command" type="text" placeholder="npx">
+              <label for="mcp-f-args">Arguments</label>
+              <input id="mcp-f-args" type="text" placeholder="-y @modelcontextprotocol/server-filesystem /path/to/project">
+              <label for="mcp-f-env">Environment variables (JSON)</label>
+              <textarea id="mcp-f-env" rows="2" placeholder='{"NODE_ENV": "production"}' spellcheck="false"></textarea>
+            </div>
+
+            <div id="mcp-http-fields" style="display: none;">
+              <label for="mcp-f-url">URL *</label>
+              <input id="mcp-f-url" type="text" placeholder="https://example.com/mcp">
+              <label for="mcp-f-headers">Custom headers (JSON)</label>
+              <textarea id="mcp-f-headers" rows="2" placeholder='{"X-Region": "us-east-1"}' spellcheck="false"></textarea>
+              <label for="mcp-f-token">Token (stored in SecretStorage)</label>
+              <div class="api-key-row">
+                <input id="mcp-f-token" type="password" placeholder="sk-...">
+                <button id="mcp-f-token-toggle" type="button" class="icon-btn tiny" title="Show token" aria-label="Show token" aria-pressed="false">👁</button>
+              </div>
+            </div>
+
+            <div id="mcp-ws-fields" style="display: none;">
+              <label for="mcp-f-ws-url">URL *</label>
+              <input id="mcp-f-ws-url" type="text" placeholder="wss://example.com/mcp">
+              <label for="mcp-f-ws-token">Token (stored in SecretStorage)</label>
+              <div class="api-key-row">
+                <input id="mcp-f-ws-token" type="password" placeholder="sk-...">
+                <button id="mcp-f-ws-token-toggle" type="button" class="icon-btn tiny" title="Show token" aria-label="Show token" aria-pressed="false">👁</button>
+              </div>
+            </div>
+
+            <div class="form-actions">
+              <button id="mcpFormCancelBtn" type="button" class="secondary">Cancel</button>
+              <button id="mcpFormSaveBtn" type="submit">Save</button>
+            </div>
+          </form>
+        </div>
       </div>
     </div>
 
@@ -1348,7 +1496,7 @@
           </div>
           <div class="git-ai-tools">
             <div class="pr-desc-group">
-              <select id="prBaseBranch" class="base-branch-select" title="Base branch to compare against">
+              <select id="prBaseBranch" class="base-branch-select" title="Target branch — PR will merge into this branch">
                 <option value="">main (default)</option>
               </select>
               <button id="prDescBtn" type="button" class="git-ai-btn" title="Generate PR description from branch diff">✨ PR description</button>
@@ -1359,6 +1507,7 @@
             <div class="ai-output-header">
               <span class="ai-output-title">PR description</span>
               <span class="ai-output-meta" id="prDescMeta"></span>
+              <button id="prDescCreateBtn" type="button" class="git-ai-btn" title="Create PR via MCP" style="display: none;">Create PR</button>
               <button id="prDescCopyBtn" type="button" class="icon-btn-mini" title="Copy to clipboard">⧉</button>
               <button id="prDescCloseBtn" type="button" class="icon-btn-mini" title="Close">×</button>
             </div>
@@ -1979,25 +2128,62 @@
     if (!list) return;
     if (!mcpServers || mcpServers.length === 0) {
       list.innerHTML = '<div class="mcp-empty">No MCP servers configured.</div>' +
-        '<div class="mcp-help">Add servers under <code>devCode.mcp.servers</code> in VS Code settings (JSON).</div>';
+        '<div class="mcp-help">Add servers below, or configure <code>devCode.mcp.servers</code> in VS Code settings (JSON).</div>';
       return;
     }
     list.innerHTML = '';
+    const transportLabel = { 'stdio': 'local', 'streamable-http': 'HTTP', 'websocket': 'WS' };
     for (const s of mcpServers) {
-      const row = document.createElement('div');
-      row.className = 'mcp-row';
+      const server = document.createElement('div');
+      server.className = 'mcp-server';
       const statusLabel = s.status === 'connected'
         ? s.toolCount + ' tools'
         : s.status === 'connecting' ? 'connecting…'
         : s.status === 'error' ? (s.error ? 'error: ' + s.error : 'error')
         : 'idle';
       const statusClass = s.status === 'error' ? 'error-text' : '';
-      const toolsTitle = (s.tools || []).map((t) => '• ' + t.name).join('\n');
+      const tools = s.tools || [];
+      const disabledForServer = mcpDisabledTools[s.name] || [];
+
+      const row = document.createElement('div');
+      row.className = 'mcp-row';
+      const scopeLabel = s.configScope === 'workspace' ? 'ws' : 'global';
       row.innerHTML =
+        '<span class="arrow">▶</span>' +
         '<span class="dot ' + s.status + '"></span>' +
-        '<span class="name" title="' + escapeHtml(toolsTitle) + '">' + escapeHtml(s.name) + '</span>' +
-        '<span class="meta ' + statusClass + '">' + escapeHtml(statusLabel) + '</span>';
-      list.appendChild(row);
+        '<span class="name">' + escapeHtml(s.name) + '</span>' +
+        '<span class="scope-pill">' + escapeHtml(scopeLabel) + '</span>' +
+        '<span class="transport-pill">' + escapeHtml(transportLabel[s.transport] || s.transport) + '</span>' +
+        '<span class="meta ' + statusClass + '">' + escapeHtml(statusLabel) + '</span>' +
+        '<button data-action="editMcp" data-name="' + escapeHtml(s.name) + '" class="icon-btn tiny" title="Edit server">✎</button>' +
+        '<button data-action="deleteMcp" data-name="' + escapeHtml(s.name) + '" class="icon-btn tiny" title="Delete server">×</button>';
+      server.appendChild(row);
+
+      const toolsDiv = document.createElement('div');
+      toolsDiv.className = 'mcp-tools';
+      if (tools.length === 0) {
+        toolsDiv.innerHTML = '<div class="mcp-tool-item"><span class="t-desc">No tools discovered yet.</span></div>';
+      } else {
+        for (const t of tools) {
+          const item = document.createElement('div');
+          item.className = 'mcp-tool-item';
+          item.title = t.description || t.name;
+          const checked = !disabledForServer.includes(t.name) ? ' checked' : '';
+          item.innerHTML =
+            '<input type="checkbox" data-action="toggleMcpTool" data-server="' + escapeHtml(s.name) + '" data-tool="' + escapeHtml(t.name) + '"' + checked + '>' +
+            '<span class="t-name">' + escapeHtml(t.name) + '</span>' +
+            '<span class="t-desc">' + escapeHtml(t.description || '') + '</span>';
+          toolsDiv.appendChild(item);
+        }
+      }
+      server.appendChild(toolsDiv);
+
+      row.addEventListener('click', (e) => {
+        if (e.target.closest('button')) return;
+        server.classList.toggle('open');
+      });
+
+      list.appendChild(server);
     }
   }
 
@@ -2151,6 +2337,144 @@
     vscode.postMessage({ scope: 'mcp', type: 'reconnect' });
   });
 
+  // MCP add/edit/delete
+  $('mcpAddBtn').addEventListener('click', () => {
+    showMcpForm(null);
+  });
+
+  $('mcpList').addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-action]');
+    if (!btn) return;
+    const name = btn.dataset.name;
+    if (btn.dataset.action === 'editMcp') {
+      vscode.postMessage({ scope: 'mcp', type: 'getConfig' });
+      window._mcpEditTarget = name;
+    } else if (btn.dataset.action === 'deleteMcp') {
+      if (confirm('Delete MCP server "' + name + '"?')) {
+        vscode.postMessage({ scope: 'mcp', type: 'deleteServer', name: name, target: window._mcpActiveScope || 'global' });
+      }
+    }
+  });
+
+  $('mcpList').addEventListener('change', (e) => {
+    const cb = e.target.closest('[data-action="toggleMcpTool"]');
+    if (!cb) return;
+    vscode.postMessage({
+      scope: 'mcp',
+      type: 'toggleTool',
+      server: cb.dataset.server,
+      tool: cb.dataset.tool,
+    });
+  });
+
+  $('mcp-f-transport').addEventListener('change', () => {
+    const t = $('mcp-f-transport').value;
+    $('mcp-stdio-fields').style.display = t === 'stdio' ? '' : 'none';
+    $('mcp-http-fields').style.display = t === 'streamable-http' ? '' : 'none';
+    $('mcp-ws-fields').style.display = t === 'websocket' ? '' : 'none';
+  });
+
+  $('mcpFormCancelBtn').addEventListener('click', () => {
+    $('mcpFormContainer').style.display = 'none';
+  });
+
+  $('mcpForm').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const editName = $('mcp-f-edit-name').value;
+    const name = $('mcp-f-name').value.trim();
+    if (!name || !/^[a-zA-Z0-9_-]+$/.test(name)) {
+      showToast('Server name must contain only letters, digits, hyphens, and underscores.', 'error');
+      return;
+    }
+    const transport = $('mcp-f-transport').value;
+    let config = { transport: transport };
+
+    if (transport === 'stdio') {
+      const command = $('mcp-f-command').value.trim();
+      if (!command) { showToast('Command is required for stdio transport.', 'error'); return; }
+      config.command = command;
+      const argsRaw = $('mcp-f-args').value.trim();
+      if (argsRaw) config.args = argsRaw.split(/\s+/);
+      try {
+        const envRaw = $('mcp-f-env').value.trim();
+        if (envRaw) config.env = JSON.parse(envRaw);
+      } catch { showToast('Invalid JSON in environment variables.', 'error'); return; }
+    } else if (transport === 'streamable-http') {
+      const url = $('mcp-f-url').value.trim();
+      if (!url) { showToast('URL is required for streamable-http transport.', 'error'); return; }
+      config.url = url;
+      try {
+        const hRaw = $('mcp-f-headers').value.trim();
+        if (hRaw) config.headers = JSON.parse(hRaw);
+      } catch { showToast('Invalid JSON in custom headers.', 'error'); return; }
+    } else if (transport === 'websocket') {
+      const url = $('mcp-f-ws-url').value.trim();
+      if (!url) { showToast('URL is required for websocket transport.', 'error'); return; }
+      config.url = url;
+    }
+
+    const target = $('mcp-f-scope').value;
+    const type = editName ? 'updateServer' : 'addServer';
+    const msg = { scope: 'mcp', type: type, name: name, config: config, target: target };
+    if (transport === 'streamable-http') {
+      const token = $('mcp-f-token').value;
+      if (token !== undefined) msg.token = token;
+    } else if (transport === 'websocket') {
+      const token = $('mcp-f-ws-token').value;
+      if (token !== undefined) msg.token = token;
+    }
+    vscode.postMessage(msg);
+    $('mcpFormContainer').style.display = 'none';
+  });
+
+  function showMcpForm(serverConfig) {
+    $('mcpFormContainer').style.display = '';
+    $('mcp-f-scope').value = window._mcpActiveScope || 'global';
+    customSelect.refresh($('mcp-f-scope'));
+    const tokenStatus = window._mcpTokenStatus || {};
+    if (serverConfig) {
+      $('mcpFormTitle').textContent = 'Edit MCP Server';
+      $('mcp-f-edit-name').value = serverConfig.name || '';
+      $('mcp-f-name').value = serverConfig.name || '';
+      const t = serverConfig.transport || 'stdio';
+      $('mcp-f-transport').value = t;
+      customSelect.refresh($('mcp-f-transport'));
+      $('mcp-f-token').value = '';
+      $('mcp-f-ws-token').value = '';
+      const hasToken = !!tokenStatus[serverConfig.name];
+      if (t === 'streamable-http') {
+        $('mcp-f-url').value = serverConfig.url || '';
+        $('mcp-f-headers').value = serverConfig.headers ? JSON.stringify(serverConfig.headers) : '';
+        $('mcp-f-token').placeholder = hasToken ? '(token exists — leave blank to keep)' : 'sk-...';
+      } else if (t === 'websocket') {
+        $('mcp-f-ws-url').value = serverConfig.url || '';
+        $('mcp-f-ws-token').placeholder = hasToken ? '(token exists — leave blank to keep)' : 'sk-...';
+      }
+      if (t === 'stdio') {
+        $('mcp-f-command').value = serverConfig.command || '';
+        $('mcp-f-args').value = (serverConfig.args || []).join(' ');
+        $('mcp-f-env').value = serverConfig.env ? JSON.stringify(serverConfig.env) : '';
+      }
+    } else {
+      $('mcpFormTitle').textContent = 'Add MCP Server';
+      $('mcp-f-edit-name').value = '';
+      $('mcp-f-name').value = '';
+      $('mcp-f-transport').value = 'stdio';
+      customSelect.refresh($('mcp-f-transport'));
+      $('mcp-f-command').value = '';
+      $('mcp-f-args').value = '';
+      $('mcp-f-env').value = '';
+      $('mcp-f-url').value = '';
+      $('mcp-f-headers').value = '';
+      $('mcp-f-ws-url').value = '';
+      $('mcp-f-token').value = '';
+      $('mcp-f-token').placeholder = 'sk-...';
+      $('mcp-f-ws-token').value = '';
+      $('mcp-f-ws-token').placeholder = 'sk-...';
+    }
+    $('mcp-f-transport').dispatchEvent(new Event('change'));
+  }
+
   $('skillsReloadBtn').addEventListener('click', () => {
     vscode.postMessage({ scope: 'skills', type: 'reload' });
   });
@@ -2222,6 +2546,21 @@
     btn.setAttribute('aria-label', btn.title);
     btn.textContent = showing ? '👁' : '🙈';
   });
+  function addTokenToggle(btnId, inputId) {
+    const btn = $(btnId);
+    if (!btn) return;
+    btn.addEventListener('click', () => {
+      const input = $(inputId);
+      const showing = input.type === 'text';
+      input.type = showing ? 'password' : 'text';
+      btn.setAttribute('aria-pressed', showing ? 'false' : 'true');
+      btn.title = showing ? 'Show token' : 'Hide token';
+      btn.setAttribute('aria-label', btn.title);
+      btn.textContent = showing ? '👁' : '🙈';
+    });
+  }
+  addTokenToggle('mcp-f-token-toggle', 'mcp-f-token');
+  addTokenToggle('mcp-f-ws-token-toggle', 'mcp-f-ws-token');
   $('providerForm').addEventListener('submit', (e) => {
     e.preventDefault();
     let collected;
@@ -2701,6 +3040,30 @@
     }
   });
 
+  $('prDescCreateBtn').addEventListener('click', () => {
+    const tool = window._createPrTool;
+    if (!tool) return;
+    const repo = activeRepo();
+    if (!repo) return;
+    const text = $('prDescText').value;
+    if (!text.trim()) return;
+    const lines = text.split('\n');
+    const title = (lines[0] || '').replace(/^#+\s*/, '').trim() || 'PR from dev-code';
+    vscode.postMessage({
+      scope: 'git',
+      type: 'createPr',
+      repoId: repo.id,
+      serverName: tool.serverName,
+      toolName: tool.toolName,
+      prefixedName: tool.prefixedName,
+      title: title,
+      body: text,
+      head: (activeRepo() && activeRepo().branch) || '',
+      base: $('prBaseBranch').value || 'main',
+    });
+    $('prDescCreateBtn').disabled = true;
+  });
+
   $('branchNameBtn').addEventListener('click', () => {
     const repo = activeRepo();
     if (!repo) return;
@@ -2723,6 +3086,7 @@
   let pendingImages = new Map(); // sessionId → [{ dataUrl, mediaType, label, sizeBytes }]
   let historyState = []; // HistorySummary[]
   let mcpServers = []; // McpServerSummary[]
+  let mcpDisabledTools = {}; // Record<string, string[]>
   let skills = []; // SkillSummary[]
 
   function getPending(sessionId) {
@@ -3751,7 +4115,17 @@
       } else if (msg.type === 'prDescription') {
         $('prDescOutput').style.display = '';
         $('prDescText').value = msg.text;
-        $('prDescMeta').textContent = msg.branch + ' ← ' + msg.baseBranch;
+        $('prDescMeta').textContent = msg.branch + ' → ' + msg.baseBranch;
+        $('prDescMeta').title = 'Source: ' + msg.branch + ' | Target: ' + msg.baseBranch;
+        window._createPrTool = msg.createPrTool || null;
+        const btn = $('prDescCreateBtn');
+        if (msg.createPrTool && btn) {
+          btn.style.display = '';
+          btn.textContent = 'Create PR';
+          btn.title = 'Create PR via ' + msg.createPrTool.serverName;
+        } else if (btn) {
+          btn.style.display = 'none';
+        }
       } else if (msg.type === 'branches') {
         populateBranchSelects(msg.branches);
       } else if (msg.type === 'branchSuggestions') {
@@ -3766,12 +4140,14 @@
           $('commitBtn').disabled = true;
           $('prDescBtn').disabled = true;
           $('prBaseBranch').disabled = true;
+          $('prDescCreateBtn').disabled = true;
           $('branchSelect').disabled = true;
           $('branchNameBtn').disabled = true;
         } else {
           el.classList.remove('show');
           $('prDescBtn').disabled = false;
           $('prBaseBranch').disabled = false;
+          $('prDescCreateBtn').disabled = false;
           $('branchSelect').disabled = false;
           $('branchNameBtn').disabled = false;
           renderGit();
@@ -3800,7 +4176,19 @@
     } else if (msg.scope === 'mcp') {
       if (msg.type === 'state') {
         mcpServers = msg.servers || [];
+        mcpDisabledTools = msg.disabledTools || {};
         renderMcp();
+      } else if (msg.type === 'config') {
+        window._mcpActiveScope = msg.configScope || 'global';
+        window._mcpTokenStatus = msg.tokenStatus || {};
+        const servers = msg.servers || {};
+        const name = window._mcpEditTarget;
+        if (name && servers[name]) {
+          showMcpForm({ name: name, ...servers[name] });
+        } else if (name) {
+          showMcpForm({ name: name });
+        }
+        window._mcpEditTarget = null;
       }
     } else if (msg.scope === 'skills') {
       if (msg.type === 'state') {

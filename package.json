@@ -2,7 +2,7 @@
   "name": "dev-code",
   "displayName": "dev-code",
   "description": "Open-source code completion. Use any provider compatible with Anthropic, OpenAI, Gemini, or Ollama.",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "publisher": "dev-code",
   "license": "MIT",
   "repository": {
@@ -323,32 +323,48 @@
         "devCode.mcp.servers": {
           "type": "object",
           "default": {},
-          "description": "MCP (Model Context Protocol) servers spawned as subprocesses; their tools become available to the AI. Key is server name; value is { command, args?, env? }.",
+          "description": "MCP (Model Context Protocol) servers. Key is server name. Transport can be 'stdio' (local subprocess, default), 'streamable-http' (remote HTTP+SSE), or 'websocket' (remote WebSocket).",
           "additionalProperties": {
             "type": "object",
-            "required": [
-              "command"
-            ],
             "properties": {
+              "transport": {
+                "type": "string",
+                "enum": ["stdio", "streamable-http", "websocket"],
+                "description": "Transport type. Defaults to 'stdio' if omitted (backward compatible)."
+              },
               "command": {
                 "type": "string",
-                "description": "Executable to launch (stdio MCP server)."
+                "description": "Executable to launch (stdio transport)."
               },
               "args": {
                 "type": "array",
-                "items": {
-                  "type": "string"
-                },
-                "description": "Arguments passed to the command."
+                "items": { "type": "string" },
+                "description": "Arguments passed to the command (stdio transport)."
               },
               "env": {
                 "type": "object",
-                "additionalProperties": {
-                  "type": "string"
-                },
-                "description": "Extra environment variables for the server process."
+                "additionalProperties": { "type": "string" },
+                "description": "Extra environment variables for the server process (stdio transport)."
+              },
+              "url": {
+                "type": "string",
+                "description": "Server URL (streamable-http or websocket transport)."
+              },
+              "headers": {
+                "type": "object",
+                "additionalProperties": { "type": "string" },
+                "description": "Custom HTTP headers sent with every request (streamable-http transport)."
               }
             }
+          }
+        },
+        "devCode.mcp.disabledTools": {
+          "type": "object",
+          "default": {},
+          "description": "Disabled MCP tools per server. Key is server name, value is array of tool names to hide from the AI.",
+          "additionalProperties": {
+            "type": "array",
+            "items": { "type": "string" }
           }
         },
         "devCode.toolUse.blacklist": {
