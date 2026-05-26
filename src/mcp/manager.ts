@@ -114,11 +114,11 @@ export class McpManager {
     }
     if (client.status !== 'connected') {
       try {
-        await client.connect();
+        await withTimeout(client.connect(), 15_000, `MCP server "${client.name}" connection timed out`);
         this.notify();
-      } catch {
+      } catch (err) {
         return {
-          content: `MCP server "${client.name}" failed to connect`,
+          content: `MCP server "${client.name}" failed to connect: ${err instanceof Error ? err.message : String(err)}`,
           isError: true,
         };
       }
@@ -185,4 +185,11 @@ export class McpManager {
 /** Sanitize a name for use in `mcp__<server>__<tool>`. Keep [a-zA-Z0-9_-]. */
 function sanitize(name: string): string {
   return name.replace(/[^a-zA-Z0-9_-]/g, '_');
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  const timeout = new Promise<never>((_, reject) =>
+    setTimeout(() => reject(new Error(message)), ms),
+  );
+  return Promise.race([promise, timeout]);
 }

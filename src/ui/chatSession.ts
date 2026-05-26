@@ -693,7 +693,7 @@ export class ChatSession {
         );
       }
 
-      const toolsAllowed = this.kind === 'explain' || this.kind === 'review';
+      const toolsAllowed = this.kind === 'chat' || this.kind === 'explain' || this.kind === 'review';
       const useTools = toolsAllowed && getToolUseEnabled() && !!provider.chatWithTools;
 
       log.info('chat session: turn', {
@@ -830,7 +830,7 @@ export class ChatSession {
       const toolResults: ToolResultBlock[] = [];
       for (const tu of turnTools) {
         if (signal.aborted) break;
-        const result = await executeTool(tu.name, tu.input, subCtx);
+        const result = await withAbort(executeTool(tu.name, tu.input, subCtx), signal);
         toolResults.push({
           type: 'tool_result',
           tool_use_id: tu.id,
@@ -956,7 +956,7 @@ export class ChatSession {
       const toolResults: ToolResultBlock[] = [];
       for (const tu of turnToolUses) {
         if (ctrl.signal.aborted) break;
-        const result = await executeTool(tu.name, tu.input, toolCtx);
+        const result = await withAbort(executeTool(tu.name, tu.input, toolCtx), ctrl.signal);
         toolResults.push({
           type: 'tool_result',
           tool_use_id: tu.id,
@@ -1105,4 +1105,17 @@ function langInstruction(): string {
 function skillsInstruction(): string {
   const mgr = getSkillManager();
   return mgr?.buildSystemPromptAddition() ?? '';
+}
+
+/** Race a promise against an AbortSignal — rejects if the signal fires first. */
+function withAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(new DOMException('Aborted', 'AbortError'));
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(new DOMException('Aborted', 'AbortError'));
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (v) => { signal.removeEventListener('abort', onAbort); resolve(v); },
+      (e) => { signal.removeEventListener('abort', onAbort); reject(e); },
+    );
+  });
 }
