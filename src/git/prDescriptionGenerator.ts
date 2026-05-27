@@ -1,8 +1,19 @@
 import type * as vscode from 'vscode';
 import * as log from '../util/logger';
+import type { LLMProvider } from '../providers/base';
 import { getProviderForFeature } from '../providers/manager';
 
-const SYSTEM_PROMPT = [
+const TITLE_SYSTEM_PROMPT = [
+  'You are an expert software engineer writing a pull request title.',
+  'Rules:',
+  '- Output ONLY the PR title text. No quotes, no markdown, no preamble.',
+  '- Keep it concise, specific, and under 72 characters.',
+  '- Use imperative mood.',
+  '- Prefer conventional prefixes like feat, fix, refactor, chore, docs, test, perf, ci, build when they fit the change.',
+  '- Do not invent context not present in the diff or commit log.',
+].join('\n');
+
+const BODY_SYSTEM_PROMPT = [
   'You are an expert software engineer writing a pull request description.',
   'Rules:',
   '- Output ONLY the description body in markdown — no surrounding code fences.',
@@ -23,11 +34,20 @@ const SYSTEM_PROMPT = [
 const MAX_DIFF_CHARS = 40000;
 const MAX_LOG_CHARS = 6000;
 
+type PrContext = {
+  diff: string;
+  commitLog: string;
+  branch: string;
+  baseBranch: string;
+  instructions?: string;
+  template?: string;
+};
+
 export async function generatePrDescription(
   context: vscode.ExtensionContext,
-  opts: { diff: string; commitLog: string; branch: string; baseBranch: string },
+  opts: PrContext,
   signal: AbortSignal,
-): Promise<string> {
+): Promise<{ title: string; body: string }> {
   const provider = await getProviderForFeature(context, 'prDescription');
   if (!provider) {
     throw new Error(
@@ -40,6 +60,12 @@ export async function generatePrDescription(
   const userContent = [
     `Branch: ${opts.branch}`,
     `Base branch: ${opts.baseBranch}`,
+    opts.instructions?.trim() ? '' : null,
+    opts.instructions?.trim() ? 'User instructions:' : null,
+    opts.instructions?.trim() ? opts.instructions.trim() : null,
+    opts.template?.trim() ? '' : null,
+    opts.template?.trim() ? 'Requested template:' : null,
+    opts.template?.trim() ? opts.template.trim() : null,
     '',
     'Commit log (newest first):',
     '```',
@@ -50,7 +76,7 @@ export async function generatePrDescription(
     '```diff',
     diffTruncated ? opts.diff.slice(0, MAX_DIFF_CHARS) + '\n... [truncated]' : opts.diff,
     '```',
-  ].join('\n');
+  ].filter((part): part is string => part !== null).join('\n');
 
   log.info('pr description: requesting', {
     provider: provider.id,
@@ -61,20 +87,53 @@ export async function generatePrDescription(
   });
 
   const t0 = Date.now();
+  const [title, body] = await Promise.all([
+    collectResponse(provider, TITLE_SYSTEM_PROMPT, userContent, signal, 120),
+    collectResponse(provider, BODY_SYSTEM_PROMPT, userContent, signal, 1500),
+  ]);
+
+  const cleanTitle = cleanTitleText(title) || fallbackTitle(opts.branch);
+  const cleanBody = stripFences(body);
+  log.info('pr description: ready', { ms: Date.now() - t0, titleChars: cleanTitle.length, bodyChars: cleanBody.length });
+  return { title: cleanTitle, body: cleanBody };
+}
+
+async function collectResponse(
+  provider: LLMProvider,
+  systemPrompt: string,
+  userContent: string,
+  signal: AbortSignal,
+  maxTokens: number,
+): Promise<string> {
   const chunks: string[] = [];
   for await (const chunk of provider.chat(
     [
-      { role: 'system', content: SYSTEM_PROMPT },
+      { role: 'system', content: systemPrompt },
       { role: 'user', content: userContent },
     ],
-    { maxTokens: 1500, temperature: 0.3 },
+    { maxTokens, temperature: 0.3 },
     signal,
   )) {
     chunks.push(chunk);
   }
-  const text = chunks.join('').trim();
-  log.info('pr description: ready', { ms: Date.now() - t0, chars: text.length });
-  return stripFences(text);
+  return chunks.join('').trim();
+}
+
+function cleanTitleText(raw: string): string {
+  let out = stripFences(raw).replace(/^#+\s*/, '').trim();
+  if (
+    (out.startsWith('"') && out.endsWith('"')) ||
+    (out.startsWith("'") && out.endsWith("'")) ||
+    (out.startsWith('`') && out.endsWith('`'))
+  ) {
+    out = out.slice(1, -1).trim();
+  }
+  return out.replace(/\s+/g, ' ').trim();
+}
+
+function fallbackTitle(branch: string): string {
+  const cleaned = branch.replace(/^refs\/heads\//, '').replace(/[\/_-]+/g, ' ').trim();
+  return cleaned ? `Update ${cleaned}` : 'PR from dev-code';
 }
 
 function stripFences(raw: string): string {

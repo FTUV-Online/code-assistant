@@ -231,6 +231,77 @@
   .pr-desc-group {
     display: flex; gap: 4px; align-items: center;
   }
+  .pr-desc-split {
+    position: relative;
+    display: inline-flex;
+    align-items: stretch;
+    white-space: nowrap;
+  }
+  .pr-desc-split .git-ai-btn {
+    border-radius: 0;
+  }
+  .pr-desc-split .git-ai-btn:first-child {
+    border-top-left-radius: 3px;
+    border-bottom-left-radius: 3px;
+  }
+  .pr-desc-split .git-ai-btn:last-child {
+    border-top-right-radius: 3px;
+    border-bottom-right-radius: 3px;
+  }
+  .pr-desc-split .git-ai-btn + .git-ai-btn {
+    border-left: none;
+    padding-left: 6px;
+    padding-right: 6px;
+    min-width: 26px;
+  }
+  .pr-desc-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    right: 0;
+    min-width: 220px;
+    background: var(--vscode-dropdown-background, var(--vscode-input-background));
+    color: var(--vscode-dropdown-foreground, var(--vscode-input-foreground));
+    border: 1px solid var(--vscode-dropdown-border, var(--vscode-focusBorder, #888));
+    border-radius: 4px;
+    box-shadow: 0 3px 10px rgba(0,0,0,0.4);
+    padding: 4px;
+    z-index: 1200;
+  }
+  .pr-desc-menu-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    color: inherit;
+    border: none;
+    border-radius: 3px;
+    padding: 6px 8px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .pr-desc-menu-item:hover {
+    background: var(--vscode-list-hoverBackground);
+  }
+  .pr-desc-menu-item .hint {
+    display: block;
+    opacity: 0.7;
+    font-size: 10px;
+    margin-top: 2px;
+  }
+  .pr-desc-options {
+    margin-top: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .pr-desc-options-row {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+  .pr-desc-options-row > * {
+    flex: 1;
+  }
   .base-branch-select {
     background: var(--vscode-dropdown-background, var(--vscode-input-background));
     color: var(--vscode-dropdown-foreground, var(--vscode-input-foreground));
@@ -1499,7 +1570,24 @@
               <select id="prBaseBranch" class="base-branch-select" title="Target branch — PR will merge into this branch">
                 <option value="">main (default)</option>
               </select>
+            <div class="pr-desc-split">
               <button id="prDescBtn" type="button" class="git-ai-btn" title="Generate PR description from branch diff">✨ PR description</button>
+              <button id="prDescMenuBtn" type="button" class="git-ai-btn" title="More PR description options" aria-haspopup="menu" aria-expanded="false">▾</button>
+              <div id="prDescMenu" class="pr-desc-menu" style="display: none;" role="menu">
+                <button type="button" class="pr-desc-menu-item" data-pr-action="generate" role="menuitem">
+                  Generate description
+                  <span class="hint">Use the default prompt.</span>
+                </button>
+                <button type="button" class="pr-desc-menu-item" data-pr-action="instructions" role="menuitem">
+                  Generate with instructions
+                  <span class="hint">Add custom formatting or reviewer guidance.</span>
+                </button>
+                <button type="button" class="pr-desc-menu-item" data-pr-action="template" role="menuitem">
+                  Generate from template
+                  <span class="hint">Apply a predefined PR description structure.</span>
+                </button>
+              </div>
+            </div>
             </div>
             <button id="branchNameBtn" type="button" class="git-ai-btn" title="Suggest branch names">✨ Branch name</button>
           </div>
@@ -1511,6 +1599,41 @@
               <button id="prDescCopyBtn" type="button" class="icon-btn-mini" title="Copy to clipboard">⧉</button>
               <button id="prDescCloseBtn" type="button" class="icon-btn-mini" title="Close">×</button>
             </div>
+            <div id="prDescOptions" class="pr-desc-options" style="display: none;">
+              <textarea id="prDescInstructions" rows="3" spellcheck="false" placeholder="Optional instructions (e.g. 'Keep Summary to 2 bullets and include rollout notes')."></textarea>
+              <div class="pr-desc-options-row">
+                <select id="prDescTemplateSelect" data-cs="1" title="Choose a PR template">
+                  <option value="">No template</option>
+                  <option value="## Summary
+- <what changed>
+
+## Testing
+- <how it was tested>">Summary + Testing</option>
+                  <option value="## Context
+- <problem>
+
+## Changes
+- <what changed>
+
+## Risks
+- <known risks>
+
+## Testing
+- <how it was tested>">Context + Risks</option>
+                  <option value="## Why
+- <motivation>
+
+## What changed
+- <changes>
+
+## Reviewer notes
+- <what to focus on>
+">Reviewer Notes</option>
+                </select>
+                <button id="prDescRegenerateBtn" type="button" class="git-ai-btn" title="Generate with the selected options">Generate</button>
+              </div>
+            </div>
+            <input id="prTitleText" type="text" spellcheck="false" placeholder="PR title..." style="margin: 8px 0 8px 0;" />
             <textarea id="prDescText" rows="10" spellcheck="false"></textarea>
           </div>
           <div id="branchSuggestList" class="ai-output" style="display: none;">
@@ -2989,6 +3112,57 @@
     vscode.postMessage({ scope: 'git', type: 'generateMessage', repoId: repo.id });
   });
 
+  let prDescMenuOpen = false;
+  let prDescMode = 'default';
+
+  function closePrDescMenu() {
+    prDescMenuOpen = false;
+    $('prDescMenu').style.display = 'none';
+    $('prDescMenuBtn').setAttribute('aria-expanded', 'false');
+  }
+
+  function openPrDescMenu() {
+    prDescMenuOpen = true;
+    $('prDescMenu').style.display = '';
+    $('prDescMenuBtn').setAttribute('aria-expanded', 'true');
+  }
+
+  function togglePrDescMenu() {
+    if (prDescMenuOpen) closePrDescMenu();
+    else openPrDescMenu();
+  }
+
+  function setPrDescMode(mode) {
+    prDescMode = mode;
+    const showOptions = mode !== 'default';
+    $('prDescOptions').style.display = showOptions ? '' : 'none';
+    if (showOptions) {
+      $('prDescOutput').style.display = '';
+      customSelect.refresh($('prDescTemplateSelect'));
+    }
+    if (mode === 'instructions') {
+      $('prDescInstructions').focus();
+    } else if (mode === 'template') {
+      customSelect.refresh($('prDescTemplateSelect'));
+    }
+  }
+
+  function triggerPrDescriptionGeneration(mode) {
+    const repo = activeRepo();
+    if (!repo) return;
+    const base = $('prBaseBranch').value;
+    const instructions = $('prDescInstructions').value.trim();
+    const template = $('prDescTemplateSelect').value;
+    vscode.postMessage({
+      scope: 'git',
+      type: 'generatePrDescription',
+      repoId: repo.id,
+      baseBranch: base,
+      instructions: mode === 'default' ? '' : instructions,
+      template: mode === 'template' ? template : '',
+    });
+  }
+
   function renderBranchSuggestions(names) {
     const ul = $('branchSuggestItems');
     ul.innerHTML = '';
@@ -3021,21 +3195,53 @@
   }
 
   $('prDescBtn').addEventListener('click', () => {
-    const repo = activeRepo();
-    if (!repo) return;
-    const base = $('prBaseBranch').value;
-    vscode.postMessage({ scope: 'git', type: 'generatePrDescription', repoId: repo.id, baseBranch: base });
+    setPrDescMode('default');
+    triggerPrDescriptionGeneration('default');
+  });
+  $('prDescMenuBtn').addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    togglePrDescMenu();
+  });
+  $('prDescMenu').addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-pr-action]');
+    if (!btn) return;
+    const action = btn.dataset.prAction;
+    closePrDescMenu();
+    if (action === 'generate') {
+      setPrDescMode('default');
+      triggerPrDescriptionGeneration('default');
+    } else if (action === 'instructions') {
+      setPrDescMode('instructions');
+    } else if (action === 'template') {
+      setPrDescMode('template');
+    }
+  });
+  document.addEventListener('click', (e) => {
+    if (!prDescMenuOpen) return;
+    const split = e.target.closest('.pr-desc-split');
+    if (!split) closePrDescMenu();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && prDescMenuOpen) closePrDescMenu();
+  });
+  $('prDescRegenerateBtn').addEventListener('click', () => {
+    triggerPrDescriptionGeneration(prDescMode);
   });
   $('prDescCloseBtn').addEventListener('click', () => {
     $('prDescOutput').style.display = 'none';
+    closePrDescMenu();
   });
   $('prDescCopyBtn').addEventListener('click', async () => {
+    const title = $('prTitleText').value.trim();
     const text = $('prDescText').value;
+    const fullText = title ? title + '\n\n' + text : text;
     try {
-      await navigator.clipboard.writeText(text);
-      showToast('Copied PR description.', 'success');
+      await navigator.clipboard.writeText(fullText);
+      showToast('Copied PR title and description.', 'success');
     } catch {
-      $('prDescText').select();
+      $('prTitleText').focus();
+      $('prTitleText').select();
       showToast('Select-and-copy fallback.', 'info');
     }
   });
@@ -3045,10 +3251,9 @@
     if (!tool) return;
     const repo = activeRepo();
     if (!repo) return;
+    const title = $('prTitleText').value.trim();
     const text = $('prDescText').value;
-    if (!text.trim()) return;
-    const lines = text.split('\n');
-    const title = (lines[0] || '').replace(/^#+\s*/, '').trim() || 'PR from dev-code';
+    if (!title || !text.trim()) return;
     vscode.postMessage({
       scope: 'git',
       type: 'createPr',
@@ -4114,7 +4319,8 @@
         $('commitMessage').value = msg.text;
       } else if (msg.type === 'prDescription') {
         $('prDescOutput').style.display = '';
-        $('prDescText').value = msg.text;
+        $('prTitleText').value = msg.title || '';
+        $('prDescText').value = msg.body;
         $('prDescMeta').textContent = msg.branch + ' → ' + msg.baseBranch;
         $('prDescMeta').title = 'Source: ' + msg.branch + ' | Target: ' + msg.baseBranch;
         window._createPrTool = msg.createPrTool || null;
@@ -4139,6 +4345,10 @@
           $('generateBtn').disabled = true;
           $('commitBtn').disabled = true;
           $('prDescBtn').disabled = true;
+          $('prDescMenuBtn').disabled = true;
+          $('prDescRegenerateBtn').disabled = true;
+          $('prDescInstructions').disabled = true;
+          $('prDescTemplateSelect').disabled = true;
           $('prBaseBranch').disabled = true;
           $('prDescCreateBtn').disabled = true;
           $('branchSelect').disabled = true;
@@ -4146,6 +4356,10 @@
         } else {
           el.classList.remove('show');
           $('prDescBtn').disabled = false;
+          $('prDescMenuBtn').disabled = false;
+          $('prDescRegenerateBtn').disabled = false;
+          $('prDescInstructions').disabled = false;
+          $('prDescTemplateSelect').disabled = false;
           $('prBaseBranch').disabled = false;
           $('prDescCreateBtn').disabled = false;
           $('branchSelect').disabled = false;
@@ -4199,6 +4413,7 @@
   });
 
   customSelect.enhanceAll();
+  customSelect.refresh($('prDescTemplateSelect'));
   vscode.postMessage({ scope: 'meta', type: 'ready' });
 </script>
 </body>

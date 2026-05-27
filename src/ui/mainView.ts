@@ -102,7 +102,7 @@ type Inbound =
   | { scope: 'git'; type: 'unstageAll'; repoId: string }
   | { scope: 'git'; type: 'commit'; repoId: string; message: string }
   | { scope: 'git'; type: 'generateMessage'; repoId: string }
-  | { scope: 'git'; type: 'generatePrDescription'; repoId: string; baseBranch: string }
+  | { scope: 'git'; type: 'generatePrDescription'; repoId: string; baseBranch: string; instructions?: string; template?: string }
   | { scope: 'git'; type: 'createPr'; repoId: string; serverName: string; toolName: string; prefixedName: string; title: string; body: string; head: string; base: string }
   | { scope: 'git'; type: 'listBranches'; repoId: string }
   | { scope: 'git'; type: 'checkoutBranch'; repoId: string; branch: string }
@@ -146,7 +146,7 @@ type Outbound =
       activeRepoId: string;
     }
   | { scope: 'git'; type: 'commitMessage'; text: string }
-  | { scope: 'git'; type: 'prDescription'; text: string; branch: string; baseBranch: string; createPrTool?: { serverName: string; toolName: string; prefixedName: string } }
+  | { scope: 'git'; type: 'prDescription'; title: string; body: string; branch: string; baseBranch: string; createPrTool?: { serverName: string; toolName: string; prefixedName: string } }
   | { scope: 'git'; type: 'branchSuggestions'; names: string[] }
   | { scope: 'git'; type: 'branches'; branches: string[] }
   | { scope: 'git'; type: 'busy'; busy: boolean; label?: string }
@@ -872,7 +872,12 @@ export class MainViewProvider implements vscode.WebviewViewProvider {
         await this.handleGenerate(msg.repoId);
         return;
       case 'generatePrDescription':
-        await this.handleGeneratePrDescription(msg.repoId, msg.baseBranch);
+        await this.handleGeneratePrDescription(
+          msg.repoId,
+          msg.baseBranch,
+          msg.instructions,
+          msg.template,
+        );
         return;
       case 'createPr':
         await this.handleCreatePr(
@@ -931,7 +936,12 @@ export class MainViewProvider implements vscode.WebviewViewProvider {
     await this.openDiffAnalysis(kind, diff, relPath || filePath, filePath);
   }
 
-  private async handleGeneratePrDescription(repoId: string, baseBranch: string): Promise<void> {
+  private async handleGeneratePrDescription(
+    repoId: string,
+    baseBranch: string,
+    instructions?: string,
+    template?: string,
+  ): Promise<void> {
     this.generateAbort?.abort();
     const ctrl = new AbortController();
     this.generateAbort = ctrl;
@@ -949,13 +959,20 @@ export class MainViewProvider implements vscode.WebviewViewProvider {
         return;
       }
       this.post({ scope: 'git', type: 'busy', busy: true, label: 'Generating PR description...' });
-      const text = await generatePrDescription(
+      const { title, body } = await generatePrDescription(
         this.context,
-        { diff, commitLog, branch, baseBranch: base },
+        {
+          diff,
+          commitLog,
+          branch,
+          baseBranch: base,
+          instructions,
+          template,
+        },
         ctrl.signal,
       );
       const createPrTool = this.findPrCreationTool();
-      this.post({ scope: 'git', type: 'prDescription', text, branch, baseBranch: base, createPrTool: createPrTool || undefined });
+      this.post({ scope: 'git', type: 'prDescription', title, body, branch, baseBranch: base, createPrTool: createPrTool || undefined });
     } catch (err) {
       const m = err instanceof Error ? err.message : String(err);
       this.post({ scope: 'meta', type: 'toast', message: m, kind: 'error' });
