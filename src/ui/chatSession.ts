@@ -116,7 +116,11 @@ const CHAT_SYSTEM_PROMPT =
   'find_references for semantic navigation (they use VS Code language servers). ' +
   'Use these tools whenever the user references workspace state ("this file", "where is X used", etc.). ' +
   'When you learn something durable (user preferences, project conventions, corrections), save it ' +
-  'via write_memory so it survives this session. Format responses with markdown. Be concise and direct.';
+  'via write_memory so it survives this session. Format responses with markdown. Be concise and direct.\n\n' +
+  'CRITICAL: never end your turn after announcing an action without performing it. If your text ' +
+  'ends with a colon, ellipsis, arrow ("→"), or any phrase that promises a next step, you MUST ' +
+  'call the corresponding tool in the same turn. Either complete the work in this turn or finish ' +
+  'with a self-contained final answer — never with an unfinished promise.';
 
 const CODE_REWRITE_PROMPT =
   'You are an expert engineer rewriting a code snippet to optimize it while ' +
@@ -995,7 +999,7 @@ export class ChatSession {
       for await (const event of provider.chatWithTools(
         messages,
         [],
-        { maxTokens: 2000, temperature: 0.4 },
+        { maxTokens: 4096, temperature: 0.4 },
         ctrl.signal,
       )) {
         if (ctrl.signal.aborted) break;
@@ -1009,7 +1013,7 @@ export class ChatSession {
     } else {
       for await (const chunk of provider.chat(
         messages,
-        { maxTokens: 2000, temperature: 0.4 },
+        { maxTokens: 4096, temperature: 0.4 },
         ctrl.signal,
       )) {
         if (ctrl.signal.aborted) break;
@@ -1032,6 +1036,8 @@ export class ChatSession {
     }
     const tools = getAllToolDefs();
     const maxIters = getToolUseMaxIterations();
+    const MAX_AUTO_CONTINUE = 2;
+    let autoContinueCount = 0;
     await ensureMemoryPromptLoaded();
 
     for (let iter = 0; iter < maxIters; iter++) {
@@ -1050,7 +1056,7 @@ export class ChatSession {
       for await (const event of provider.chatWithTools(
         messages,
         tools,
-        { maxTokens: 2000, temperature: 0.4 },
+        { maxTokens: 4096, temperature: 0.4 },
         ctrl.signal,
       )) {
         if (ctrl.signal.aborted) break;
@@ -1086,8 +1092,28 @@ export class ChatSession {
         this.messages.push({ role: 'assistant', content: assistantBlocks });
       }
 
-      if (turnToolUses.length === 0 || ctrl.signal.aborted) {
-        break; // final answer or aborted
+      if (ctrl.signal.aborted) break;
+
+      if (turnToolUses.length === 0) {
+        // Model ended its turn with text only. Check for the "announce intent
+        // then stop" failure mode — a final sentence that promises an action
+        // without actually calling a tool. If detected, nudge it to continue.
+        const finalText = turnText.join('').trimEnd();
+        if (
+          autoContinueCount < MAX_AUTO_CONTINUE &&
+          finalText.length > 0 &&
+          looksLikeIntentWithoutAction(finalText)
+        ) {
+          autoContinueCount++;
+          this.messages.push({
+            role: 'user',
+            content:
+              'Continue with the action you just announced. Call the tool now — do not narrate intent again, just execute.',
+          });
+          log.info('auto-continue triggered', { count: autoContinueCount, tail: finalText.slice(-80) });
+          continue;
+        }
+        break; // genuine final answer
       }
 
       // Execute each tool, post result, append to history
@@ -1280,6 +1306,28 @@ export async function refreshMemoryPrompt(): Promise<void> {
 
 function memorySectionAffix(): string {
   return memoryPromptCache ? '\n\n' + memoryPromptCache : '';
+}
+
+/**
+ * Heuristic for Claude's "narrate-then-stop" failure mode. Uses only
+ * language-agnostic signals (punctuation + structure) so it works for any
+ * locale the user writes in.
+ *
+ * Triggers when the assistant ended its turn with:
+ *  - empty/whitespace-only text (and no tool_use elsewhere — checked by caller)
+ *  - a trailing introductory punctuation: ":", "：", "…", "..."
+ *  - a trailing arrow like "→" / "->" / "=>" used to introduce the next step
+ *
+ * Anything ending with "." "!" "?" or a closing quote is treated as a genuine
+ * final answer and is NOT auto-continued.
+ */
+function looksLikeIntentWithoutAction(text: string): boolean {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return true;
+  if (/[:：…]$/.test(trimmed)) return true;
+  if (trimmed.endsWith('...')) return true;
+  if (/(?:→|->|=>)\s*$/.test(trimmed)) return true;
+  return false;
 }
 
 /** Race a promise against an AbortSignal — rejects if the signal fires first. */

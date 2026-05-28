@@ -2,7 +2,7 @@
   "name": "dev-code",
   "displayName": "dev-code",
   "description": "Open-source code completion. Use any provider compatible with Anthropic, OpenAI, Gemini, or Ollama.",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "publisher": "dev-code",
   "license": "MIT",
   "repository": {
@@ -507,7 +507,7 @@
     "compile": "npm run typecheck && node esbuild.js",
     "watch": "node esbuild.js --watch",
     "test": "tsx --test test/**/*.test.ts",
-    "package": "vsce package --allow-missing-repository --out \"$(node -e 'const p=require(\\\"./package.json\\\");console.log(p.name+\\\"-\\\"+p.version+\\\".vsix\\\")')\"",
+    "package": "vsce package",
     "vscode:prepublish": "npm run compile"
   },
   "devDependencies": {
