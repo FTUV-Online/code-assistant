@@ -2,7 +2,7 @@
   "name": "dev-code",
   "displayName": "dev-code",
   "description": "Open-source code completion. Use any provider compatible with Anthropic, OpenAI, Gemini, or Ollama.",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "publisher": "dev-code",
   "license": "MIT",
   "repository": {
@@ -299,13 +299,18 @@
         },
         "devCode.toolUse.allowWriteTools": {
           "type": "boolean",
-          "default": false,
-          "description": "Allow the AI to use write_file and edit_file. Each call still asks for user approval. Default off."
+          "default": true,
+          "description": "Allow the AI to use write_file and edit_file. Each call still asks for user approval. Default on."
+        },
+        "devCode.toolUse.showDiffPreview": {
+          "type": "boolean",
+          "default": true,
+          "description": "Open a side-by-side diff editor before approving write_file / edit_file calls so you can review the exact change. Disable to fall back to a text-only summary."
         },
         "devCode.toolUse.allowShell": {
           "type": "boolean",
-          "default": false,
-          "description": "Allow the AI to run shell commands via the run_command tool (PowerShell on Windows, sh on Linux/Mac). Each call asks for user approval unless the command matches shellAutoApprove. DEFAULT OFF — review carefully before enabling."
+          "default": true,
+          "description": "Allow the AI to run shell commands via the run_command tool (PowerShell on Windows, sh on Linux/Mac). Each call asks for user approval unless the command matches shellAutoApprove. Default on."
         },
         "devCode.toolUse.shellAutoApprove": {
           "type": "array",

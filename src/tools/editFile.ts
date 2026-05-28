@@ -1,6 +1,8 @@
 import * as vscode from 'vscode';
+import { getShowDiffPreview } from '../config/settings';
 import { isBinary, matchesAnyGlob, resolveSafePath } from './common';
-import { confirmDestructive } from './confirmation';
+import { isSessionApproved, requestToolApproval } from './confirmation';
+import { showDiffPreview } from './diffPreview';
 import { applyEdits, type FindReplace } from './editLogic';
 import type { Tool } from './types';
 
@@ -15,8 +17,11 @@ export const editFileTool: Tool = {
   def: {
     name: 'edit_file',
     description:
-      'Make precise find/replace edits to an existing file. Each "find" must match exactly once ' +
-      '(include enough surrounding context to be unambiguous). Asks the user for approval before writing.',
+      'Make precise find/replace edits to an existing file. By default each "find" must match ' +
+      'exactly once (include enough surrounding context to be unambiguous). For symbol renames or ' +
+      'version bumps where the same token appears repeatedly, set "replaceAll": true on that edit ' +
+      'to update every occurrence in one shot — this is the preferred pattern over multiple edits ' +
+      'with extra context. Asks the user for approval before writing.',
     input_schema: {
       type: 'object',
       properties: {
@@ -32,6 +37,11 @@ export const editFileTool: Tool = {
             properties: {
               find: { type: 'string', description: 'Exact text to find (verbatim, including whitespace).' },
               replace: { type: 'string', description: 'Replacement text.' },
+              replaceAll: {
+                type: 'boolean',
+                description:
+                  'When true, replace every occurrence of "find" in the file. Default false (require unique match).',
+              },
             },
             required: ['find', 'replace'],
           },
@@ -80,12 +90,33 @@ export const editFileTool: Tool = {
     }
 
     const summary = `Apply ${edits.length} edit${edits.length === 1 ? '' : 's'} to ${relPath}?`;
-    const outcome = await confirmDestructive(
-      'edit_file',
-      summary,
-      `${applied.result.length - original.length >= 0 ? '+' : ''}${applied.result.length - original.length} chars net change. ` +
-        `Review the diff in VS Code before approving if unsure.`,
-    );
+    const netDelta = applied.result.length - original.length;
+
+    const wantDiff = !isSessionApproved('edit_file') && getShowDiffPreview();
+    let closeDiff: (() => Promise<void>) | undefined;
+    if (wantDiff) {
+      closeDiff = await showDiffPreview({
+        relPath,
+        original,
+        proposed: applied.result,
+        isNewFile: false,
+      });
+    }
+
+    let outcome: 'approve' | 'deny';
+    try {
+      outcome = await requestToolApproval(
+        ctx,
+        'edit_file',
+        summary,
+        `${netDelta >= 0 ? '+' : ''}${netDelta} chars net change.` +
+          (wantDiff
+            ? ' Review the diff in the editor before approving.'
+            : ' Review the diff in VS Code before approving if unsure.'),
+      );
+    } finally {
+      if (closeDiff) await closeDiff();
+    }
     if (outcome === 'deny') {
       return { content: 'Denied by user.', isError: true };
     }

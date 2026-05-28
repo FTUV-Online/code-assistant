@@ -6,19 +6,27 @@ import {
   FEATURE_LIST,
   SUPPORTED_OUTPUT_LANGUAGES,
   getActiveProviderId,
+  getAllowShell,
+  getAllowWriteTools,
   getFeatures,
   getIncludeFullFile,
   getMcpDisabledTools,
   getOutputLanguage,
   getProviderConfigs,
+  getShellAutoApprove,
+  getShowDiffPreview,
   isEnabled,
   setActiveProviderId,
+  setAllowShell,
+  setAllowWriteTools,
   setEnabled,
   setFeature,
   setIncludeFullFile,
   setMcpDisabledTools,
   setOutputLanguage,
   setProviderConfigs,
+  setShellAutoApprove,
+  setShowDiffPreview,
   type FeatureName,
   type FeaturesMap,
 } from '../config/settings';
@@ -39,6 +47,7 @@ import {
   type SessionKind,
 } from './chatSession';
 import type { McpManager } from '../mcp/manager';
+import { McpOAuthProvider } from '../mcp/oauth';
 import type { McpServerSummary } from '../mcp/types';
 import type { McpServerConfigSetting } from '../config/settings';
 import type { SkillManager } from '../skills/manager';
@@ -46,6 +55,44 @@ import type { SkillSummary } from '../skills/types';
 
 const HISTORY_KEY = 'devCode.chatHistory';
 const HISTORY_LIMIT = 50;
+
+const WORKSPACE_FILE_EXCLUDE =
+  '{**/node_modules/**,**/.git/**,**/dist/**,**/out/**,**/build/**,**/target/**,**/.next/**,**/.cache/**,**/.venv/**,**/venv/**}';
+
+/**
+ * Build a case-insensitive glob fragment from a query so VS Code's `findFiles`
+ * matches across the whole tree (it is case-sensitive on POSIX). Strips
+ * characters with special glob meaning to avoid breaking the pattern.
+ */
+function caseInsensitiveGlobFragment(query: string): string {
+  const cleaned = query.replace(/[*?{}[\]()!,]/g, '');
+  let out = '';
+  for (const ch of cleaned) {
+    const lo = ch.toLowerCase();
+    const up = ch.toUpperCase();
+    out += lo === up ? ch : `[${lo}${up}]`;
+  }
+  return out;
+}
+
+/**
+ * Search workspace files using the query as part of the include glob so
+ * `findFiles` does the filtering server-side and the maxResults cap can stay
+ * tight without missing matches in deep sub-folders.
+ */
+export async function searchWorkspaceFiles(
+  query: string,
+  maxResults: number,
+): Promise<vscode.Uri[]> {
+  const q = query.trim();
+  const include = q.length > 0 ? `**/*${caseInsensitiveGlobFragment(q)}*` : '**/*';
+  try {
+    return await vscode.workspace.findFiles(include, WORKSPACE_FILE_EXCLUDE, maxResults);
+  } catch (err) {
+    log.error('findFiles', err);
+    return [];
+  }
+}
 
 type Inbound =
   | { scope: 'meta'; type: 'ready' }
@@ -64,6 +111,8 @@ type Inbound =
   | { scope: 'mcp'; type: 'deleteServer'; name: string; target: 'global' | 'workspace' }
   | { scope: 'mcp'; type: 'toggleTool'; server: string; tool: string }
   | { scope: 'mcp'; type: 'getConfig' }
+  | { scope: 'mcp'; type: 'startOAuth'; name: string }
+  | { scope: 'mcp'; type: 'signOut'; name: string }
   | { scope: 'skills'; type: 'list' }
   | { scope: 'skills'; type: 'reload' }
   | { scope: 'skills'; type: 'open'; filePath: string }
@@ -84,6 +133,13 @@ type Inbound =
   | { scope: 'chat'; sessionId: string; type: 'clear' }
   | { scope: 'chat'; sessionId: string; type: 'editMessage'; index: number; text: string }
   | { scope: 'chat'; sessionId: string; type: 'attachFileByPath'; path: string; label: string }
+  | {
+      scope: 'chat';
+      sessionId: string;
+      type: 'approvalResponse';
+      approvalId: string;
+      decision: 'approve' | 'approveAll' | 'deny';
+    }
   | { scope: 'meta'; type: 'requestFileList'; query: string; requestId: string }
   | { scope: 'config'; type: 'addProvider'; config: ProviderConfig; apiKey?: string }
   | { scope: 'config'; type: 'updateProvider'; config: ProviderConfig; apiKey?: string }
@@ -93,6 +149,10 @@ type Inbound =
   | { scope: 'config'; type: 'testConnection'; config: ProviderConfig; apiKey?: string }
   | { scope: 'config'; type: 'setOutputLanguage'; language: string }
   | { scope: 'config'; type: 'setIncludeFullFile'; value: boolean }
+  | { scope: 'config'; type: 'setAllowWriteTools'; value: boolean }
+  | { scope: 'config'; type: 'setShowDiffPreview'; value: boolean }
+  | { scope: 'config'; type: 'setAllowShell'; value: boolean }
+  | { scope: 'config'; type: 'setShellAutoApprove'; value: string[] }
   | { scope: 'config'; type: 'setFeatureEnabled'; feature: FeatureName; value: boolean }
   | { scope: 'config'; type: 'setFeatureProvider'; feature: FeatureName; providerId: string }
   | { scope: 'git'; type: 'selectRepo'; repoId: string }
@@ -109,7 +169,7 @@ type Inbound =
   | { scope: 'git'; type: 'generateBranchName'; repoId: string; intent: string }
   | { scope: 'git'; type: 'openFile'; path: string }
   | { scope: 'git'; type: 'openDiff'; repoId: string; path: string; staged: boolean }
-  | { scope: 'git'; type: 'discard'; repoId: string; path: string }
+  | { scope: 'git'; type: 'discard'; repoId: string; path: string; relPath?: string }
   | { scope: 'git'; type: 'explainChange'; repoId: string; path: string; relPath: string; staged: boolean }
   | { scope: 'git'; type: 'reviewChange'; repoId: string; path: string; relPath: string; staged: boolean }
   | { scope: 'git'; type: 'rescan' };
@@ -133,6 +193,10 @@ type Outbound =
       outputLanguage: string;
       supportedLanguages: readonly string[];
       includeFullFile: boolean;
+      allowWriteTools: boolean;
+      showDiffPreview: boolean;
+      allowShell: boolean;
+      shellAutoApprove: string[];
       features: FeaturesMap;
       featureList: typeof FEATURE_LIST;
     }
@@ -308,7 +372,7 @@ export class MainViewProvider implements vscode.WebviewViewProvider {
           ? vscode.ConfigurationTarget.Workspace
           : vscode.ConfigurationTarget.Global;
         const config = vscode.workspace.getConfiguration('devCode');
-        const servers = config.get<Record<string, McpServerConfigSetting>>('mcp.servers') ?? {};
+        const servers = cloneServers(config.get<Record<string, McpServerConfigSetting>>('mcp.servers'));
         servers[msg.name] = msg.config;
         await config.update('mcp.servers', servers, target);
         if (msg.token !== undefined) {
@@ -348,16 +412,52 @@ export class MainViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     if (msg.type === 'deleteServer') {
+      const pick = await vscode.window.showWarningMessage(
+        `Delete MCP server "${msg.name}"?`,
+        { modal: true, detail: 'Stored OAuth tokens and API keys for this server will also be cleared.' },
+        'Delete',
+      );
+      if (pick !== 'Delete') return;
       try {
         const target = msg.target === 'workspace'
           ? vscode.ConfigurationTarget.Workspace
           : vscode.ConfigurationTarget.Global;
         const config = vscode.workspace.getConfiguration('devCode');
-        const servers = config.get<Record<string, McpServerConfigSetting>>('mcp.servers') ?? {};
+        // config.get() returns a frozen/proxied object — clone before mutating.
+        const servers = cloneServers(config.get<Record<string, McpServerConfigSetting>>('mcp.servers'));
         delete servers[msg.name];
         await config.update('mcp.servers', servers, target);
         await deleteMcpToken(this.context, msg.name);
+        await new McpOAuthProvider(this.context, msg.name).clearAll();
         this.post({ scope: 'meta', type: 'toast', message: `MCP server "${msg.name}" removed.`, kind: 'success' });
+      } catch (err) {
+        const m = err instanceof Error ? err.message : String(err);
+        this.post({ scope: 'meta', type: 'toast', message: m, kind: 'error' });
+      }
+      return;
+    }
+    if (msg.type === 'startOAuth') {
+      this.post({ scope: 'meta', type: 'toast', message: `Opening browser to sign in to "${msg.name}"…`, kind: 'info' });
+      try {
+        await this.mcpManager.startOAuth(msg.name);
+        this.post({ scope: 'meta', type: 'toast', message: `Signed in to "${msg.name}".`, kind: 'success' });
+      } catch (err) {
+        const m = err instanceof Error ? err.message : String(err);
+        this.post({ scope: 'meta', type: 'toast', message: `Sign-in failed: ${m}`, kind: 'error' });
+      }
+      return;
+    }
+    if (msg.type === 'signOut') {
+      const pick = await vscode.window.showWarningMessage(
+        `Sign out of "${msg.name}"?`,
+        { modal: true, detail: 'OAuth tokens and the registered client will be cleared. You will need to sign in again to use this server.' },
+        'Sign out',
+      );
+      if (pick !== 'Sign out') return;
+      try {
+        await new McpOAuthProvider(this.context, msg.name).clearAll();
+        await this.mcpManager.reconnect();
+        this.post({ scope: 'meta', type: 'toast', message: `Signed out of "${msg.name}".`, kind: 'success' });
       } catch (err) {
         const m = err instanceof Error ? err.message : String(err);
         this.post({ scope: 'meta', type: 'toast', message: m, kind: 'error' });
@@ -555,19 +655,13 @@ export class MainViewProvider implements vscode.WebviewViewProvider {
         abs = vscode.Uri.joinPath(ws.uri, msg.path).fsPath;
       }
       await sess.attachFile({ filePath: abs, fileLabel: msg.label });
+    } else if (msg.type === 'approvalResponse') {
+      sess.resolveApproval(msg.approvalId, msg.decision);
     }
   }
 
   private async handleFileListRequest(query: string, requestId: string): Promise<void> {
-    const exclude =
-      '{**/node_modules/**,**/.git/**,**/dist/**,**/out/**,**/build/**,**/target/**,**/.next/**,**/.cache/**,**/.venv/**,**/venv/**}';
-    let files: vscode.Uri[];
-    try {
-      files = await vscode.workspace.findFiles('**/*', exclude, 2000);
-    } catch {
-      this.post({ scope: 'meta', type: 'fileList', requestId, files: [] });
-      return;
-    }
+    const files = await searchWorkspaceFiles(query, 500);
     const q = query.toLowerCase();
     const items = files
       .map((uri) => {
@@ -575,7 +669,6 @@ export class MainViewProvider implements vscode.WebviewViewProvider {
         const name = rel.split('/').pop() || rel;
         return { path: rel, name };
       })
-      .filter((f) => !q || f.name.toLowerCase().includes(q) || f.path.toLowerCase().includes(q))
       .sort((a, b) => {
         const an = a.name.toLowerCase();
         const bn = b.name.toLowerCase();
@@ -583,6 +676,8 @@ export class MainViewProvider implements vscode.WebviewViewProvider {
           const ai = an.startsWith(q) ? 0 : an.includes(q) ? 1 : 2;
           const bi = bn.startsWith(q) ? 0 : bn.includes(q) ? 1 : 2;
           if (ai !== bi) return ai - bi;
+          // Prefer shorter paths so root-level matches outrank deep matches.
+          if (a.path.length !== b.path.length) return a.path.length - b.path.length;
         }
         return an.localeCompare(bn);
       })
@@ -629,50 +724,43 @@ export class MainViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async showAttachFilePicker(sess: ChatSession): Promise<void> {
-    const exclude =
-      '{**/node_modules/**,**/.git/**,**/dist/**,**/out/**,**/build/**,**/target/**,**/.next/**,**/.cache/**,**/.venv/**,**/venv/**}';
-    let files: vscode.Uri[];
-    try {
-      files = await vscode.workspace.findFiles('**/*', exclude, 5000);
-    } catch (err) {
-      log.error('findFiles', err);
-      this.post({
-        scope: 'meta',
-        type: 'toast',
-        message: 'Failed to list workspace files.',
-        kind: 'error',
+    type Item = vscode.QuickPickItem & { uri: vscode.Uri };
+    const qp = vscode.window.createQuickPick<Item>();
+    qp.title = 'Attach a file to this chat';
+    qp.placeholder = 'Type to filter workspace files…';
+    qp.matchOnDescription = true;
+    qp.matchOnDetail = true;
+
+    let queryToken = 0;
+    const refresh = async (query: string): Promise<void> => {
+      const token = ++queryToken;
+      qp.busy = true;
+      const files = await searchWorkspaceFiles(query, 500);
+      if (token !== queryToken) return; // a newer keystroke superseded this
+      qp.items = files.map((uri) => {
+        const relative = vscode.workspace.asRelativePath(uri).replace(/\\/g, '/');
+        const segments = relative.split('/');
+        const name = segments[segments.length - 1];
+        const dir = segments.slice(0, -1).join('/');
+        return { label: name, description: dir, detail: relative, uri };
       });
-      return;
-    }
-    if (files.length === 0) {
-      this.post({
-        scope: 'meta',
-        type: 'toast',
-        message: 'No files found in workspace.',
-        kind: 'info',
-      });
-      return;
-    }
-    const items = files.map((uri) => {
-      const relative = vscode.workspace.asRelativePath(uri);
-      const segments = relative.replace(/\\/g, '/').split('/');
-      const name = segments[segments.length - 1];
-      const dir = segments.slice(0, -1).join('/');
-      return {
-        label: name,
-        description: dir,
-        detail: relative,
-        uri,
-      };
+      qp.busy = false;
+    };
+
+    qp.onDidChangeValue((value) => {
+      void refresh(value);
     });
-    const picked = await vscode.window.showQuickPick(items, {
-      title: 'Attach a file to this chat',
-      placeHolder: 'Type to filter workspace files…',
-      matchOnDescription: true,
-      matchOnDetail: true,
+
+    const picked = await new Promise<Item | undefined>((resolve) => {
+      qp.onDidAccept(() => resolve(qp.selectedItems[0]));
+      qp.onDidHide(() => resolve(undefined));
+      qp.show();
+      void refresh('');
     });
+    qp.dispose();
+
     if (picked) {
-      await sess.attachFile({ filePath: picked.uri.fsPath, fileLabel: picked.detail });
+      await sess.attachFile({ filePath: picked.uri.fsPath, fileLabel: picked.detail ?? '' });
     }
   }
 
@@ -800,6 +888,12 @@ export class MainViewProvider implements vscode.WebviewViewProvider {
         return;
       }
       case 'deleteProvider': {
+        const pick = await vscode.window.showWarningMessage(
+          `Delete provider "${msg.id}"?`,
+          { modal: true, detail: 'The stored API key for this provider will also be removed.' },
+          'Delete',
+        );
+        if (pick !== 'Delete') return;
         const remaining = getProviderConfigs().filter((c) => c.id !== msg.id);
         await setProviderConfigs(remaining);
         await deleteApiKey(this.context, msg.id);
@@ -834,6 +928,28 @@ export class MainViewProvider implements vscode.WebviewViewProvider {
         await setIncludeFullFile(msg.value);
         await this.postConfigState();
         return;
+      case 'setAllowWriteTools':
+        await setAllowWriteTools(msg.value);
+        await this.postConfigState();
+        return;
+      case 'setShowDiffPreview':
+        await setShowDiffPreview(msg.value);
+        await this.postConfigState();
+        return;
+      case 'setAllowShell':
+        await setAllowShell(msg.value);
+        await this.postConfigState();
+        return;
+      case 'setShellAutoApprove': {
+        const clean = Array.isArray(msg.value)
+          ? msg.value
+              .map((s) => (typeof s === 'string' ? s.trim() : ''))
+              .filter((s) => s.length > 0)
+          : [];
+        await setShellAutoApprove(clean);
+        await this.postConfigState();
+        return;
+      }
       case 'setFeatureEnabled':
         await setFeature(msg.feature, { enabled: msg.value });
         await this.postConfigState();
@@ -900,10 +1016,22 @@ export class MainViewProvider implements vscode.WebviewViewProvider {
       case 'openDiff':
         await vscode.commands.executeCommand('git.openChange', vscode.Uri.file(msg.path));
         return;
-      case 'discard':
+      case 'discard': {
+        const label = msg.relPath ?? msg.path;
+        const pick = await vscode.window.showWarningMessage(
+          `Discard changes for "${label}"?`,
+          { modal: true, detail: 'This cannot be undone.' },
+          'Discard',
+        );
+        if (pick !== 'Discard') {
+          // Tell the webview to clear any optimistic pending state for this path.
+          this.post({ scope: 'meta', type: 'toast', message: 'Discard cancelled.', kind: 'info' });
+          return;
+        }
         await this.repoManager.discard(msg.repoId, msg.path);
         this.post({ scope: 'meta', type: 'toast', message: 'Changes discarded.', kind: 'info' });
         return;
+      }
       case 'explainChange':
         await this.analyseChange('explain', msg.repoId, msg.path, msg.relPath, msg.staged);
         return;
@@ -1173,6 +1301,10 @@ export class MainViewProvider implements vscode.WebviewViewProvider {
       outputLanguage: getOutputLanguage(),
       supportedLanguages: SUPPORTED_OUTPUT_LANGUAGES,
       includeFullFile: getIncludeFullFile(),
+      allowWriteTools: getAllowWriteTools(),
+      showDiffPreview: getShowDiffPreview(),
+      allowShell: getAllowShell(),
+      shellAutoApprove: getShellAutoApprove(),
       features: getFeatures(),
       featureList: FEATURE_LIST,
     });
@@ -1199,6 +1331,17 @@ export class MainViewProvider implements vscode.WebviewViewProvider {
   private post(payload: Outbound): void {
     this.view?.webview.postMessage(payload);
   }
+}
+
+/**
+ * `vscode.workspace.getConfiguration().get()` returns a frozen/proxied object
+ * tree — attempting to mutate it (set property, delete key) throws
+ * `'isExtensible' on proxy: trap result does not reflect extensibility…`.
+ * Deep-clone via JSON round-trip before any mutation.
+ */
+function cloneServers(raw: Record<string, McpServerConfigSetting> | undefined): Record<string, McpServerConfigSetting> {
+  if (!raw) return {};
+  return JSON.parse(JSON.stringify(raw)) as Record<string, McpServerConfigSetting>;
 }
 
 function validateConfig(c: ProviderConfig): void {

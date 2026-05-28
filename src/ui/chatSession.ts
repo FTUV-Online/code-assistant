@@ -22,6 +22,8 @@ import type {
 } from '../providers/base';
 import { getProviderById } from '../providers/manager';
 import { estimateCostUsd } from '../providers/pricing';
+import { buildMemoryPromptSection } from '../memory/manager';
+import { matchesAnyGlob, resolveSafePath } from '../tools/common';
 import {
   executeTool,
   getAllToolDefs,
@@ -34,6 +36,15 @@ import * as log from '../util/logger';
 
 export type SessionKind = 'explain' | 'review' | 'rewrite' | 'chat';
 export type CodeAnalysisKind = 'explain' | 'review' | 'rewrite';
+
+async function isReadableFile(absPath: string): Promise<boolean> {
+  try {
+    const stat = await vscode.workspace.fs.stat(vscode.Uri.file(absPath));
+    return (stat.type & vscode.FileType.File) !== 0;
+  } catch {
+    return false;
+  }
+}
 
 export type HistoryEntry = {
   id: string;
@@ -99,9 +110,13 @@ const CHAT_SYSTEM_PROMPT =
   'You are a coding assistant inside a VS Code extension. The user can ask any coding ' +
   'or workspace-related question. They may attach files (via the + button) or images. ' +
   'You have workspace tools available (read_file, grep, list_dir, find_files, git_log, ' +
-  'get_open_tabs, get_selection, delegate_research). Use them when the user references ' +
-  'workspace state ("this file", "where is X used", etc.). ' +
-  'Format responses with markdown. Be concise and direct. Cite file paths with line numbers when relevant.';
+  'get_open_tabs, get_selection, find_symbol, goto_definition, find_references, delegate_research) ' +
+  'and memory tools (read_memory, write_memory, list_memory) for persistent notes across sessions. ' +
+  'Prefer find_symbol over grep when looking up a definition by name, and goto_definition / ' +
+  'find_references for semantic navigation (they use VS Code language servers). ' +
+  'Use these tools whenever the user references workspace state ("this file", "where is X used", etc.). ' +
+  'When you learn something durable (user preferences, project conventions, corrections), save it ' +
+  'via write_memory so it survives this session. Format responses with markdown. Be concise and direct.';
 
 const CODE_REWRITE_PROMPT =
   'You are an expert engineer rewriting a code snippet to optimize it while ' +
@@ -172,6 +187,16 @@ export type ChatOutbound =
   | { type: 'context'; sessionId: string; info: ChatContextInfo }
   | { type: 'toolUse'; sessionId: string; callId: string; name: string; input: unknown }
   | { type: 'toolResult'; sessionId: string; callId: string; content: string; ok: boolean }
+  | {
+      type: 'approvalRequest';
+      sessionId: string;
+      approvalId: string;
+      callId?: string;
+      toolName: string;
+      summary: string;
+      detail?: string;
+    }
+  | { type: 'approvalCleared'; sessionId: string; approvalId: string }
   | { type: 'pendingImage'; sessionId: string; image: ImagePayload }
   | { type: 'titleUpdate'; sessionId: string; title: string }
   | { type: 'rewindMessage'; sessionId: string }
@@ -192,6 +217,14 @@ export class ChatSession {
   private attachments: string[] = [];
   private selectedProviderId = '';
   private currentAbort: AbortController | null = null;
+  private pendingApprovals = new Map<
+    string,
+    {
+      resolve: (decision: 'approve' | 'approveAll' | 'deny') => void;
+      abortCleanup?: () => void;
+    }
+  >();
+  private approvalCounter = 0;
   private cumulativeUsage = {
     inputTokens: 0,
     outputTokens: 0,
@@ -411,6 +444,8 @@ export class ChatSession {
     if (!trimmed && attachments.length === 0) return;
     const wasEmpty = this.messages.length === 0;
 
+    if (trimmed) await this.resolveAndAttachMentions(trimmed);
+
     if (attachments.length === 0) {
       this.messages.push({ role: 'user', content: trimmed });
     } else {
@@ -440,6 +475,55 @@ export class ChatSession {
     });
     this.postContext();
     await this.streamReply();
+  }
+
+  /**
+   * Scan a user message for `@path/to/file.ext` mentions and silently attach
+   * each one that resolves to an existing workspace file. Lets users write
+   * "review @src/foo.ts" without going through the popup or the 📎 picker.
+   */
+  private async resolveAndAttachMentions(text: string): Promise<void> {
+    const root = getWorkspaceRoot();
+    if (!root) return;
+    const blacklist = getToolUseBlacklist();
+
+    // Match @<path> where path starts after whitespace/start, contains
+    // path-safe chars, has a dot (extension required to reduce false positives).
+    const re = /(?:^|\s)@([A-Za-z0-9_./\\-]+\.[A-Za-z0-9_-]+)/g;
+    const seen = new Set<string>();
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      const raw = m[1];
+      if (seen.has(raw)) continue;
+      seen.add(raw);
+
+      // Try direct relative resolution first.
+      let absPath = resolveSafePath(root, raw);
+      let displayPath = raw.replace(/\\/g, '/');
+
+      if (absPath && !(await isReadableFile(absPath))) {
+        absPath = null;
+      }
+
+      // Fallback: basename lookup if the mention has no slash and direct
+      // resolution failed. Only auto-attach when exactly one match exists.
+      if (!absPath && !raw.includes('/') && !raw.includes('\\')) {
+        const hits = await vscode.workspace.findFiles(
+          `**/${raw}`,
+          '{**/node_modules/**,**/.git/**,**/dist/**,**/out/**,**/build/**}',
+          2,
+        );
+        if (hits.length === 1) {
+          absPath = hits[0].fsPath;
+          displayPath = vscode.workspace.asRelativePath(hits[0]).replace(/\\/g, '/');
+        }
+      }
+
+      if (!absPath) continue;
+      if (matchesAnyGlob(displayPath, blacklist)) continue;
+
+      await this.attachFile({ filePath: absPath, fileLabel: displayPath, auto: true });
+    }
   }
 
   async attachFile(
@@ -760,7 +844,59 @@ export class ChatSession {
       signal,
       blacklist: getToolUseBlacklist(),
       runSubAgent: (task, subSignal) => this.runSubAgent(provider, task, subSignal),
+      requestApproval: (req) => this.requestApproval(req, signal),
     };
+  }
+
+  /**
+   * Pop an approval card into the chat UI and return a Promise that resolves
+   * once the user clicks Approve / Approve all / Discard. Honors the abort
+   * signal so stopping generation also rejects in-flight approvals.
+   */
+  private requestApproval(
+    req: { toolName: string; summary: string; detail?: string; callId?: string },
+    signal: AbortSignal,
+  ): Promise<'approve' | 'approveAll' | 'deny'> {
+    return new Promise((resolve) => {
+      if (signal.aborted) {
+        resolve('deny');
+        return;
+      }
+      const approvalId = `apv-${++this.approvalCounter}-${Date.now()}`;
+      const onAbort = (): void => {
+        if (this.pendingApprovals.has(approvalId)) {
+          this.pendingApprovals.delete(approvalId);
+          this.post({ type: 'approvalCleared', sessionId: this.id, approvalId });
+          resolve('deny');
+        }
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+      this.pendingApprovals.set(approvalId, {
+        resolve: (decision) => {
+          signal.removeEventListener('abort', onAbort);
+          resolve(decision);
+        },
+        abortCleanup: () => signal.removeEventListener('abort', onAbort),
+      });
+      this.post({
+        type: 'approvalRequest',
+        sessionId: this.id,
+        approvalId,
+        callId: req.callId,
+        toolName: req.toolName,
+        summary: req.summary,
+        detail: req.detail,
+      });
+    });
+  }
+
+  /** Called when the user clicks a button on the approval card. */
+  resolveApproval(approvalId: string, decision: 'approve' | 'approveAll' | 'deny'): void {
+    const entry = this.pendingApprovals.get(approvalId);
+    if (!entry) return;
+    this.pendingApprovals.delete(approvalId);
+    this.post({ type: 'approvalCleared', sessionId: this.id, approvalId });
+    entry.resolve(decision);
   }
 
   private async runSubAgent(
@@ -774,8 +910,9 @@ export class ChatSession {
     const tools = getSubAgentToolDefs();
     const subSystem =
       'You are a research sub-agent. The main assistant has delegated a specific research task to you. ' +
-      'Available tools: read_file, grep, list_dir, find_files, git_log, get_open_tabs, get_selection. ' +
-      'Use them as needed.\n' +
+      'Available tools: read_file, grep, list_dir, find_files, git_log, get_open_tabs, get_selection, ' +
+      'find_symbol, goto_definition, find_references. Use them as needed. ' +
+      'Prefer find_symbol / goto_definition / find_references for semantic navigation (language-server backed).\n' +
       'Goal: return a concise, accurate answer to the task. Cite file paths and line numbers when relevant. ' +
       'Be efficient: stop when you have a clear answer. Your last message must contain ONLY the answer text (no further tool calls).';
 
@@ -847,9 +984,10 @@ export class ChatSession {
 
   private async streamPlain(provider: LLMProvider, ctrl: AbortController): Promise<void> {
     this.post({ type: 'startAssistant', sessionId: this.id });
+    await ensureMemoryPromptLoaded();
     let buf = '';
     const messages: ChatMessage[] = [
-      { role: 'system', content: this.systemPrompt },
+      { role: 'system', content: this.systemPrompt + memorySectionAffix() },
       ...this.messages,
     ];
     if (provider.chatWithTools) {
@@ -894,6 +1032,7 @@ export class ChatSession {
     }
     const tools = getAllToolDefs();
     const maxIters = getToolUseMaxIterations();
+    await ensureMemoryPromptLoaded();
 
     for (let iter = 0; iter < maxIters; iter++) {
       if (ctrl.signal.aborted) break;
@@ -901,7 +1040,7 @@ export class ChatSession {
       this.post({ type: 'startAssistant', sessionId: this.id });
 
       const messages: ChatMessage[] = [
-        { role: 'system', content: this.systemPrompt },
+        { role: 'system', content: this.systemPrompt + memorySectionAffix() },
         ...this.messages,
       ];
 
@@ -956,7 +1095,14 @@ export class ChatSession {
       const toolResults: ToolResultBlock[] = [];
       for (const tu of turnToolUses) {
         if (ctrl.signal.aborted) break;
-        const result = await withAbort(executeTool(tu.name, tu.input, toolCtx), ctrl.signal);
+        const result = await withAbort(
+          executeTool(tu.name, tu.input, { ...toolCtx, callId: tu.id }),
+          ctrl.signal,
+        );
+        if (tu.name === 'write_memory' && !result.isError) {
+          // Refresh the in-prompt index so the next turn sees the new entry.
+          await refreshMemoryPrompt();
+        }
         toolResults.push({
           type: 'tool_result',
           tool_use_id: tu.id,
@@ -1105,6 +1251,35 @@ function langInstruction(): string {
 function skillsInstruction(): string {
   const mgr = getSkillManager();
   return mgr?.buildSystemPromptAddition() ?? '';
+}
+
+// Memory index is built once and refreshed when a write_memory tool fires.
+// Stored at module scope so concurrent sessions share the same cache.
+let memoryPromptCache = '';
+let memoryPromptLoaded = false;
+
+async function ensureMemoryPromptLoaded(): Promise<void> {
+  if (memoryPromptLoaded) return;
+  memoryPromptLoaded = true;
+  try {
+    memoryPromptCache = await buildMemoryPromptSection();
+  } catch (err) {
+    log.warn('memory prompt load failed', err);
+    memoryPromptCache = '';
+  }
+}
+
+export async function refreshMemoryPrompt(): Promise<void> {
+  memoryPromptLoaded = true;
+  try {
+    memoryPromptCache = await buildMemoryPromptSection();
+  } catch (err) {
+    log.warn('memory prompt refresh failed', err);
+  }
+}
+
+function memorySectionAffix(): string {
+  return memoryPromptCache ? '\n\n' + memoryPromptCache : '';
 }
 
 /** Race a promise against an AbortSignal — rejects if the signal fires first. */

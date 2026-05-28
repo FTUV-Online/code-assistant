@@ -1,7 +1,9 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { matchesAnyGlob, resolveSafePath } from './common';
-import { confirmDestructive } from './confirmation';
+import { getShowDiffPreview } from '../config/settings';
+import { isBinary, matchesAnyGlob, resolveSafePath } from './common';
+import { isSessionApproved, requestToolApproval } from './confirmation';
+import { showDiffPreview } from './diffPreview';
 import type { Tool } from './types';
 
 const MAX_WRITE_CHARS = 200_000;
@@ -57,9 +59,16 @@ export const writeFileTool: Tool = {
     }
 
     let exists = false;
+    let originalContent = '';
+    let originalIsBinary = false;
     try {
-      await vscode.workspace.fs.stat(vscode.Uri.file(abs));
+      const bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(abs));
       exists = true;
+      if (isBinary(bytes)) {
+        originalIsBinary = true;
+      } else {
+        originalContent = new TextDecoder().decode(bytes);
+      }
     } catch {
       /* doesn't exist */
     }
@@ -67,13 +76,35 @@ export const writeFileTool: Tool = {
     const lines = content.split('\n').length;
     const sizeKb = (content.length / 1024).toFixed(1);
 
-    const outcome = await confirmDestructive(
-      'write_file',
-      `${verb} ${relPath} (${sizeKb} KB, ${lines} lines)?`,
-      exists
-        ? `Existing file will be replaced. Approve only if the new content is what you want.`
-        : `A new file will be created at this path.`,
-    );
+    const wantDiff =
+      !isSessionApproved('write_file') && getShowDiffPreview() && !originalIsBinary;
+    let closeDiff: (() => Promise<void>) | undefined;
+    if (wantDiff) {
+      closeDiff = await showDiffPreview({
+        relPath,
+        original: originalContent,
+        proposed: content,
+        isNewFile: !exists,
+      });
+    }
+
+    let outcome: 'approve' | 'deny';
+    try {
+      outcome = await requestToolApproval(
+        ctx,
+        'write_file',
+        `${verb} ${relPath} (${sizeKb} KB, ${lines} lines)?`,
+        exists
+          ? `Existing file will be replaced. ${
+              wantDiff ? 'Review the diff in the editor.' : 'Approve only if the new content is what you want.'
+            }`
+          : `A new file will be created at this path.${
+              wantDiff ? ' Review the diff in the editor.' : ''
+            }`,
+      );
+    } finally {
+      if (closeDiff) await closeDiff();
+    }
     if (outcome === 'deny') {
       return { content: 'Denied by user.', isError: true };
     }

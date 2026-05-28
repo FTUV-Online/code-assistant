@@ -7,7 +7,9 @@ import { DevCodeActionProvider } from './editor/codeActionProvider';
 import { DevCodeLensProvider } from './editor/codeLensProvider';
 import { RepoManager } from './git/repoManager';
 import { McpManager } from './mcp/manager';
+import { McpOAuthProvider } from './mcp/oauth';
 import { SkillManager } from './skills/manager';
+import { registerDiffPreviewProvider } from './tools/diffPreview';
 import { setMcpManager, setSkillManager } from './tools/registry';
 import { MainViewProvider } from './ui/mainView';
 import { registerSetupWizard } from './ui/setupWizard';
@@ -52,6 +54,7 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   registerSetupWizard(context);
+  registerDiffPreviewProvider(context);
 
   const statusBar = createStatusBar(context);
   context.subscriptions.push(statusBar);
@@ -66,10 +69,15 @@ export function activate(context: vscode.ExtensionContext): void {
   void skillManager.init().catch((err) => log.error('skill init failed', err));
 
   const mcpManager = new McpManager();
+  mcpManager.setOAuthProviderFactory((name, cfg) => {
+    if (cfg.transport !== 'streamable-http') return undefined;
+    return new McpOAuthProvider(context, name, cfg.oauthScope);
+  });
   setMcpManager(mcpManager);
   context.subscriptions.push({ dispose: () => void mcpManager.dispose() });
   // Configure + connect in background.
   void reconfigureMcp(context, mcpManager).catch((err) => log.error('mcp init failed', err));
+
 
   const mainView = new MainViewProvider(context, repoManager, mcpManager, skillManager);
   context.subscriptions.push(

@@ -51,6 +51,8 @@ test('normalizeMcpServers: streamable-http transport', () => {
       transport: 'streamable-http',
       url: 'https://example.com/mcp',
       headers: { Authorization: 'Bearer sk-xxx' },
+      auth: 'bearer',
+      oauthScope: undefined,
     },
   });
 });
@@ -61,8 +63,47 @@ test('normalizeMcpServers: streamable-http without headers', () => {
   };
   const result = normalizeMcpServers(raw);
   assert.deepEqual(result, {
-    remote: { transport: 'streamable-http', url: 'https://example.com/mcp', headers: undefined },
+    remote: {
+      transport: 'streamable-http',
+      url: 'https://example.com/mcp',
+      headers: undefined,
+      auth: 'bearer',
+      oauthScope: undefined,
+    },
   });
+});
+
+test('normalizeMcpServers: streamable-http with oauth auth mode', () => {
+  const raw = {
+    atlassian: {
+      transport: 'streamable-http',
+      url: 'https://mcp.atlassian.com/v1/sse',
+      auth: 'oauth',
+      oauthScope: 'read:jira-work offline_access',
+    },
+  };
+  const result = normalizeMcpServers(raw as any);
+  assert.deepEqual(result, {
+    atlassian: {
+      transport: 'streamable-http',
+      url: 'https://mcp.atlassian.com/v1/sse',
+      headers: undefined,
+      auth: 'oauth',
+      oauthScope: 'read:jira-work offline_access',
+    },
+  });
+});
+
+test('normalizeMcpServers: streamable-http invalid auth mode falls back to bearer', () => {
+  const raw = {
+    remote: {
+      transport: 'streamable-http',
+      url: 'https://example.com/mcp',
+      auth: 'invalid-mode',
+    },
+  };
+  const result = normalizeMcpServers(raw as any);
+  assert.equal(result.remote.auth, 'bearer');
 });
 
 test('normalizeMcpServers: websocket transport', () => {

@@ -101,12 +101,42 @@ export async function setMcpDisabledTools(value: Record<string, string[]>): Prom
 
 export function getAllowWriteTools(): boolean {
   return (
-    vscode.workspace.getConfiguration(NS).get<boolean>('toolUse.allowWriteTools') ?? false
+    vscode.workspace.getConfiguration(NS).get<boolean>('toolUse.allowWriteTools') ?? true
   );
 }
 
+export function getShowDiffPreview(): boolean {
+  return (
+    vscode.workspace.getConfiguration(NS).get<boolean>('toolUse.showDiffPreview') ?? true
+  );
+}
+
+export async function setAllowWriteTools(value: boolean): Promise<void> {
+  await vscode.workspace
+    .getConfiguration(NS)
+    .update('toolUse.allowWriteTools', value, vscode.ConfigurationTarget.Global);
+}
+
+export async function setShowDiffPreview(value: boolean): Promise<void> {
+  await vscode.workspace
+    .getConfiguration(NS)
+    .update('toolUse.showDiffPreview', value, vscode.ConfigurationTarget.Global);
+}
+
+export async function setAllowShell(value: boolean): Promise<void> {
+  await vscode.workspace
+    .getConfiguration(NS)
+    .update('toolUse.allowShell', value, vscode.ConfigurationTarget.Global);
+}
+
+export async function setShellAutoApprove(value: string[]): Promise<void> {
+  await vscode.workspace
+    .getConfiguration(NS)
+    .update('toolUse.shellAutoApprove', value, vscode.ConfigurationTarget.Global);
+}
+
 export function getAllowShell(): boolean {
-  return vscode.workspace.getConfiguration(NS).get<boolean>('toolUse.allowShell') ?? false;
+  return vscode.workspace.getConfiguration(NS).get<boolean>('toolUse.allowShell') ?? true;
 }
 
 export function getShellAutoApprove(): string[] {

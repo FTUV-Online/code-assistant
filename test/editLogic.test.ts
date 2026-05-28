@@ -70,3 +70,44 @@ test('applyEdits: missing replace → error', () => {
   const r = applyEdits('x', [{ find: 'x' } as any]);
   assert.equal(r.ok, false);
 });
+
+test('applyEdits: replaceAll updates every occurrence', () => {
+  const r = applyEdits('DotNetCoreCLI@2\nfoo\nDotNetCoreCLI@2\nbar\nDotNetCoreCLI@2', [
+    { find: 'DotNetCoreCLI@2', replace: 'DotNetCoreCLI@3', replaceAll: true },
+  ]);
+  assert.equal(r.ok, true);
+  if (r.ok) {
+    assert.equal(r.result, 'DotNetCoreCLI@3\nfoo\nDotNetCoreCLI@3\nbar\nDotNetCoreCLI@3');
+    assert.equal(r.appliedCount, 1);
+  }
+});
+
+test('applyEdits: replaceAll with no matches → error (consistent with unique mode)', () => {
+  const r = applyEdits('hello', [{ find: 'world', replace: 'x', replaceAll: true }]);
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.match(r.error, /not found/);
+});
+
+test('applyEdits: ambiguous error lists line numbers', () => {
+  const r = applyEdits('foo\nbar\nfoo\nbaz\nfoo', [{ find: 'foo', replace: 'X' }]);
+  assert.equal(r.ok, false);
+  if (!r.ok) {
+    assert.match(r.error, /multiple/i);
+    assert.match(r.error, /1.*3.*5/); // lines 1, 3, 5
+    assert.match(r.error, /replaceAll/);
+  }
+});
+
+test('applyEdits: mixed edits — unique + replaceAll in one call', () => {
+  const r = applyEdits('VERSION = 1\nname: foo\nname: bar\nname: baz', [
+    { find: 'VERSION = 1', replace: 'VERSION = 2' },
+    { find: 'name:', replace: 'title:', replaceAll: true },
+  ]);
+  assert.equal(r.ok, true);
+  if (r.ok) {
+    assert.equal(
+      r.result,
+      'VERSION = 2\ntitle: foo\ntitle: bar\ntitle: baz',
+    );
+  }
+});

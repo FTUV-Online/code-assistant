@@ -19,7 +19,7 @@
 - [x] **AI-generated branch name** — Git tab → ✨ Branch name từ diff + optional intent.
 - [x] **Quick fix with AI** — CodeActionProvider tích hợp light bulb cho selection + diagnostics.
 - [x] **Code lens above functions** — `✨ Explain` / `✨ Review` lens trên function/class/method.
-- [ ] **Inline diff preview** cho `write_file` / `edit_file` trước approve — hiện diff trong modal thay vì chỉ text "+X chars".
+- [x] **Inline diff preview** cho `write_file` / `edit_file` trước approve — hiện diff trong modal thay vì chỉ text "+X chars".
 - [x] **Regenerate last assistant message** — ↻ Regenerate button cuối assistant turn.
 - [x] **Stop generation hotkey** — Esc trong chat panel hủy stream.
 - [x] **Pin tab** — 📍/📌 toggle giữ chat tab.
@@ -33,7 +33,8 @@
 - [ ] **MCP Resources + Prompts** — không chỉ tools, expose resources (file URIs) + prompt templates.
 - [ ] **Multi-line / multi-block inline completion** — completion vượt 1 hàm, predict whole block.
 - [ ] **Multi-file context** cho inline completion — gửi thêm open tabs + import resolution.
-- [ ] **Workspace indexing tùy chọn** — chỉ index symbols/file tree (không embeddings), enable LLM gọi `find_symbol` / `goto_definition` qua VS Code LSP API.
+- [x] **Workspace indexing tùy chọn** — chỉ index symbols/file tree (không embeddings), enable LLM gọi `find_symbol` / `goto_definition` / `find_references` qua VS Code LSP API.
+- [x] **Auto-memory** — `~/.dev-code/memory/` persistent store (user/feedback/project/reference types), 3 tools (`read_memory` / `write_memory` / `list_memory`), index injected vào system prompt mỗi turn để AI tự nhớ qua sessions.
 - [ ] **Telemetry opt-in** (accept rate, latency, error categories) — host endpoint riêng hoặc PostHog.
 - [ ] **Conversation history search** — search box trong welcome state filter recent chats.
 - [ ] **Skills marketplace / bundled starter skills** — `code-review`, `commit-style`, `test-writer`, `bug-investigator`...

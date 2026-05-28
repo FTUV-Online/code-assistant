@@ -730,6 +730,19 @@
   .setting-row .label { flex: 1; opacity: 0.85; }
   .setting-row select { flex: 1.4; max-width: 60%; }
 
+  .setting-stack {
+    display: flex; flex-direction: column; gap: 4px;
+    padding: 4px 0 6px;
+    font-size: 12px;
+  }
+  .setting-stack .label { opacity: 0.85; }
+  .setting-stack textarea {
+    font-family: var(--vscode-editor-font-family, monospace);
+    font-size: 12px;
+    min-height: 60px;
+    resize: vertical;
+  }
+
   .feature-row {
     display: grid;
     grid-template-columns: 1fr auto auto;
@@ -976,6 +989,31 @@
     flex: 1; overflow-y: auto;
     padding: 12px 14px 6px;
   }
+  .chat-messages-wrap {
+    flex: 1;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .jump-to-bottom {
+    position: absolute;
+    bottom: 12px;
+    right: 18px;
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    border: 1px solid var(--vscode-button-border, transparent);
+    border-radius: 999px;
+    padding: 4px 12px;
+    font-size: 11px;
+    cursor: pointer;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+    display: none;
+    opacity: 0.95;
+    z-index: 5;
+  }
+  .jump-to-bottom:hover { background: var(--vscode-button-hoverBackground); opacity: 1; }
+  .jump-to-bottom.visible { display: block; }
   .chat-empty { text-align: center; opacity: 0.5; font-size: 12px; padding: 30px 10px; }
   .regen-btn {
     display: inline-block;
@@ -1100,6 +1138,53 @@
   .tool-header .status.running { color: #d29922; }
   .tool-header .status.ok { color: #3fb950; }
   .tool-header .status.err { color: #f85149; }
+  .tool-header .status.awaiting { color: #e3b341; font-weight: 600; }
+
+  .approval-card {
+    border-top: 1px solid var(--vscode-panel-border, rgba(127,127,127,0.2));
+    padding: 8px 10px;
+    background: rgba(227, 179, 65, 0.08);
+  }
+  .approval-card .approval-title {
+    font-size: 12px;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .approval-card .approval-detail {
+    font-size: 11px;
+    opacity: 0.8;
+    margin-bottom: 8px;
+    line-height: 1.4;
+  }
+  .approval-card .approval-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .approval-btn {
+    padding: 4px 10px;
+    border-radius: 3px;
+    font-size: 11px;
+    border: 1px solid transparent;
+    cursor: pointer;
+  }
+  .approval-btn.primary {
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+  }
+  .approval-btn.primary:hover { background: var(--vscode-button-hoverBackground); }
+  .approval-btn.secondary {
+    background: var(--vscode-button-secondaryBackground, transparent);
+    color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+    border-color: var(--vscode-panel-border, rgba(127,127,127,0.3));
+  }
+  .approval-btn.secondary:hover { background: var(--vscode-button-secondaryHoverBackground, rgba(127,127,127,0.15)); }
+  .approval-btn.danger {
+    background: transparent;
+    color: #f85149;
+    border-color: rgba(248, 81, 73, 0.4);
+  }
+  .approval-btn.danger:hover { background: rgba(248, 81, 73, 0.12); }
   .tool-body {
     display: none;
     border-top: 1px solid var(--vscode-panel-border, rgba(127,127,127,0.2));
@@ -1338,6 +1423,32 @@
       </div>
     </div>
 
+    <div class="config-section" data-cssection="toolUse">
+      <div class="config-section-header" role="button" tabindex="0" data-cstoggle="toolUse">
+        <span class="arrow">▶</span>
+        <span class="title">Tool use</span>
+      </div>
+      <div class="config-section-body">
+        <div class="setting-row">
+          <label for="allowWriteTools" class="label" title="Let the AI call write_file / edit_file to modify workspace files. Each call still asks for approval. Off by default.">Allow AI to write &amp; edit files</label>
+          <input id="allowWriteTools" type="checkbox" style="margin-left: auto;">
+        </div>
+        <div class="setting-row">
+          <label for="showDiffPreview" class="label" title="Open a side-by-side diff editor before approving write_file / edit_file calls so you can review the exact change.">Show inline diff preview before approve</label>
+          <input id="showDiffPreview" type="checkbox" style="margin-left: auto;">
+        </div>
+        <div class="setting-row">
+          <label for="allowShell" class="label" title="Let the AI run shell commands via run_command. Each call asks for approval unless the command matches the auto-approve list. Off by default — review carefully.">Allow AI to run shell commands</label>
+          <input id="allowShell" type="checkbox" style="margin-left: auto;">
+        </div>
+        <div class="setting-stack" id="shellAutoApproveBlock">
+          <label for="shellAutoApprove" class="label" title="Command prefixes that auto-approve without prompting. One per line. Commands containing &amp;, |, ;, &gt;, $(, etc. are NEVER auto-approved regardless of this list.">Shell auto-approve prefixes (one per line)</label>
+          <textarea id="shellAutoApprove" rows="4" placeholder="npm&#10;git status&#10;dotnet test&#10;ls"></textarea>
+          <button id="shellAutoApproveSaveBtn" class="secondary" type="button" style="align-self: flex-start;">Save list</button>
+        </div>
+      </div>
+    </div>
+
     <div class="config-section" data-cssection="providers">
       <div class="config-section-header" role="button" tabindex="0" data-cstoggle="providers">
         <span class="arrow">▶</span>
@@ -1485,12 +1596,25 @@
             <div id="mcp-http-fields" style="display: none;">
               <label for="mcp-f-url">URL *</label>
               <input id="mcp-f-url" type="text" placeholder="https://example.com/mcp">
+              <label for="mcp-f-auth" title="How this MCP server is authenticated. OAuth uses interactive sign-in via browser; tokens are stored and refreshed automatically.">Auth method</label>
+              <select id="mcp-f-auth" data-cs="1">
+                <option value="bearer">Bearer token</option>
+                <option value="oauth">OAuth (interactive)</option>
+                <option value="none">None</option>
+              </select>
+              <div id="mcp-oauth-fields" style="display: none;">
+                <label for="mcp-f-oauth-scope" title="OAuth scopes to request, space-separated. Leave empty to use the server-recommended default.">OAuth scope (optional)</label>
+                <input id="mcp-f-oauth-scope" type="text" placeholder="read:jira-work offline_access">
+                <div class="mcp-help" style="margin-top: 4px;">Save first, then click 🔑 on the server row to sign in via browser.</div>
+              </div>
               <label for="mcp-f-headers">Custom headers (JSON)</label>
               <textarea id="mcp-f-headers" rows="2" placeholder='{"X-Region": "us-east-1"}' spellcheck="false"></textarea>
-              <label for="mcp-f-token">Token (stored in SecretStorage)</label>
-              <div class="api-key-row">
-                <input id="mcp-f-token" type="password" placeholder="sk-...">
-                <button id="mcp-f-token-toggle" type="button" class="icon-btn tiny" title="Show token" aria-label="Show token" aria-pressed="false">👁</button>
+              <div id="mcp-bearer-token-wrap">
+                <label id="mcp-f-token-label" for="mcp-f-token">Token (stored in SecretStorage)</label>
+                <div class="api-key-row">
+                  <input id="mcp-f-token" type="password" placeholder="sk-...">
+                  <button id="mcp-f-token-toggle" type="button" class="icon-btn tiny" title="Show token" aria-label="Show token" aria-pressed="false">👁</button>
+                </div>
               </div>
             </div>
 
@@ -1690,8 +1814,11 @@
       </div>
       <div class="chat-context" id="chatContext" style="display: none;"></div>
     </div>
-    <div class="chat-messages" id="chatMessages">
-      <div class="chat-empty-tabs">No chat selected.</div>
+    <div class="chat-messages-wrap">
+      <div class="chat-messages" id="chatMessages">
+        <div class="chat-empty-tabs">No chat selected.</div>
+      </div>
+      <button id="jumpToBottomBtn" class="jump-to-bottom" type="button" title="Scroll to latest">↓ Jump to latest</button>
     </div>
     <div class="chat-composer">
       <div class="chat-input-box" id="chatInputBox">
@@ -1972,6 +2099,10 @@
     outputLanguage: 'English',
     supportedLanguages: ['English'],
     includeFullFile: true,
+    allowWriteTools: true,
+    showDiffPreview: true,
+    allowShell: true,
+    shellAutoApprove: [],
     features: {},
     featureList: [],
   };
@@ -2150,6 +2281,18 @@
     langSel.value = configState.outputLanguage || 'English';
     customSelect.refresh(langSel);
     $('includeFullFile').checked = !!configState.includeFullFile;
+    $('allowWriteTools').checked = !!configState.allowWriteTools;
+    $('showDiffPreview').checked = !!configState.showDiffPreview;
+    $('allowShell').checked = !!configState.allowShell;
+    const shellTa = $('shellAutoApprove');
+    if (document.activeElement !== shellTa) {
+      shellTa.value = (configState.shellAutoApprove || []).join('\n');
+    }
+    const shellBlock = $('shellAutoApproveBlock');
+    if (shellBlock) shellBlock.style.display = configState.allowShell ? '' : 'none';
+    const diffRow = $('showDiffPreview').closest('.setting-row');
+    if (diffRow) diffRow.style.opacity = configState.allowWriteTools ? '' : '0.55';
+    $('showDiffPreview').disabled = !configState.allowWriteTools;
     renderFeatures();
     renderMcp();
     renderSkills();
@@ -2271,13 +2414,23 @@
       const row = document.createElement('div');
       row.className = 'mcp-row';
       const scopeLabel = s.configScope === 'workspace' ? 'ws' : 'global';
+      const isOAuth = s.transport === 'streamable-http' && s.auth === 'oauth';
+      const signInBtn = isOAuth && s.needsAuth
+        ? '<button data-action="signInMcp" data-name="' + escapeHtml(s.name) + '" class="icon-btn tiny" title="Sign in via OAuth">🔑</button>'
+        : '';
+      const signOutBtn = isOAuth && !s.needsAuth
+        ? '<button data-action="signOutMcp" data-name="' + escapeHtml(s.name) + '" class="icon-btn tiny" title="Sign out (clear OAuth tokens)">⎋</button>'
+        : '';
       row.innerHTML =
         '<span class="arrow">▶</span>' +
         '<span class="dot ' + s.status + '"></span>' +
         '<span class="name">' + escapeHtml(s.name) + '</span>' +
         '<span class="scope-pill">' + escapeHtml(scopeLabel) + '</span>' +
         '<span class="transport-pill">' + escapeHtml(transportLabel[s.transport] || s.transport) + '</span>' +
+        (isOAuth ? '<span class="transport-pill" title="OAuth">OAuth</span>' : '') +
         '<span class="meta ' + statusClass + '">' + escapeHtml(statusLabel) + '</span>' +
+        signInBtn +
+        signOutBtn +
         '<button data-action="editMcp" data-name="' + escapeHtml(s.name) + '" class="icon-btn tiny" title="Edit server">✎</button>' +
         '<button data-action="deleteMcp" data-name="' + escapeHtml(s.name) + '" class="icon-btn tiny" title="Delete server">×</button>';
       server.appendChild(row);
@@ -2456,6 +2609,25 @@
     vscode.postMessage({ scope: 'config', type: 'setIncludeFullFile', value: e.target.checked });
   });
 
+  $('allowWriteTools').addEventListener('change', (e) => {
+    vscode.postMessage({ scope: 'config', type: 'setAllowWriteTools', value: e.target.checked });
+  });
+
+  $('showDiffPreview').addEventListener('change', (e) => {
+    vscode.postMessage({ scope: 'config', type: 'setShowDiffPreview', value: e.target.checked });
+  });
+
+  $('allowShell').addEventListener('change', (e) => {
+    vscode.postMessage({ scope: 'config', type: 'setAllowShell', value: e.target.checked });
+  });
+
+  $('shellAutoApproveSaveBtn').addEventListener('click', () => {
+    const raw = $('shellAutoApprove').value || '';
+    const list = raw.split('\n').map((s) => s.trim()).filter((s) => s.length > 0);
+    vscode.postMessage({ scope: 'config', type: 'setShellAutoApprove', value: list });
+    showToast('Auto-approve list saved.', 'success');
+  });
+
   $('mcpReconnectBtn').addEventListener('click', () => {
     vscode.postMessage({ scope: 'mcp', type: 'reconnect' });
   });
@@ -2473,9 +2645,11 @@
       vscode.postMessage({ scope: 'mcp', type: 'getConfig' });
       window._mcpEditTarget = name;
     } else if (btn.dataset.action === 'deleteMcp') {
-      if (confirm('Delete MCP server "' + name + '"?')) {
-        vscode.postMessage({ scope: 'mcp', type: 'deleteServer', name: name, target: window._mcpActiveScope || 'global' });
-      }
+      vscode.postMessage({ scope: 'mcp', type: 'deleteServer', name: name, target: window._mcpActiveScope || 'global' });
+    } else if (btn.dataset.action === 'signInMcp') {
+      vscode.postMessage({ scope: 'mcp', type: 'startOAuth', name: name });
+    } else if (btn.dataset.action === 'signOutMcp') {
+      vscode.postMessage({ scope: 'mcp', type: 'signOut', name: name });
     }
   });
 
@@ -2496,6 +2670,15 @@
     $('mcp-http-fields').style.display = t === 'streamable-http' ? '' : 'none';
     $('mcp-ws-fields').style.display = t === 'websocket' ? '' : 'none';
   });
+
+  $('mcp-f-auth').addEventListener('change', () => {
+    syncMcpAuthFields();
+  });
+  function syncMcpAuthFields() {
+    const mode = $('mcp-f-auth').value;
+    $('mcp-bearer-token-wrap').style.display = mode === 'bearer' ? '' : 'none';
+    $('mcp-oauth-fields').style.display = mode === 'oauth' ? '' : 'none';
+  }
 
   $('mcpFormCancelBtn').addEventListener('click', () => {
     $('mcpFormContainer').style.display = 'none';
@@ -2526,6 +2709,12 @@
       const url = $('mcp-f-url').value.trim();
       if (!url) { showToast('URL is required for streamable-http transport.', 'error'); return; }
       config.url = url;
+      const authMode = $('mcp-f-auth').value;
+      config.auth = authMode;
+      if (authMode === 'oauth') {
+        const scope = $('mcp-f-oauth-scope').value.trim();
+        if (scope) config.oauthScope = scope;
+      }
       try {
         const hRaw = $('mcp-f-headers').value.trim();
         if (hRaw) config.headers = JSON.parse(hRaw);
@@ -2540,8 +2729,13 @@
     const type = editName ? 'updateServer' : 'addServer';
     const msg = { scope: 'mcp', type: type, name: name, config: config, target: target };
     if (transport === 'streamable-http') {
-      const token = $('mcp-f-token').value;
-      if (token !== undefined) msg.token = token;
+      // Only send bearer token if user is using bearer mode; for oauth/none ignore the input.
+      if (config.auth === 'bearer') {
+        const token = $('mcp-f-token').value;
+        if (token !== undefined) msg.token = token;
+      } else {
+        msg.token = ''; // clear any previously stored bearer token
+      }
     } else if (transport === 'websocket') {
       const token = $('mcp-f-ws-token').value;
       if (token !== undefined) msg.token = token;
@@ -2569,6 +2763,9 @@
         $('mcp-f-url').value = serverConfig.url || '';
         $('mcp-f-headers').value = serverConfig.headers ? JSON.stringify(serverConfig.headers) : '';
         $('mcp-f-token').placeholder = hasToken ? '(token exists — leave blank to keep)' : 'sk-...';
+        $('mcp-f-auth').value = serverConfig.auth || 'bearer';
+        customSelect.refresh($('mcp-f-auth'));
+        $('mcp-f-oauth-scope').value = serverConfig.oauthScope || '';
       } else if (t === 'websocket') {
         $('mcp-f-ws-url').value = serverConfig.url || '';
         $('mcp-f-ws-token').placeholder = hasToken ? '(token exists — leave blank to keep)' : 'sk-...';
@@ -2594,8 +2791,12 @@
       $('mcp-f-token').placeholder = 'sk-...';
       $('mcp-f-ws-token').value = '';
       $('mcp-f-ws-token').placeholder = 'sk-...';
+      $('mcp-f-auth').value = 'bearer';
+      customSelect.refresh($('mcp-f-auth'));
+      $('mcp-f-oauth-scope').value = '';
     }
     $('mcp-f-transport').dispatchEvent(new Event('change'));
+    syncMcpAuthFields();
   }
 
   $('skillsReloadBtn').addEventListener('click', () => {
@@ -2628,9 +2829,7 @@
     if (action === 'activate') {
       vscode.postMessage({ scope: 'config', type: 'activateProvider', id });
     } else if (action === 'delete') {
-      if (confirm('Delete provider "' + id + '"? This also removes its API key.')) {
-        vscode.postMessage({ scope: 'config', type: 'deleteProvider', id });
-      }
+      vscode.postMessage({ scope: 'config', type: 'deleteProvider', id });
     } else if (action === 'edit') {
       const p = configState.providers.find((x) => x.id === id);
       if (p) {
@@ -3036,10 +3235,10 @@
         vscode.postMessage({ scope: 'git', type: 'unstage', repoId: repo.id, paths: [file.path] });
         break;
       case 'discard':
-        if (confirm('Discard changes for "' + file.relPath + '"? This cannot be undone.')) {
-          markPending([file.path]);
-          vscode.postMessage({ scope: 'git', type: 'discard', repoId: repo.id, path: file.path });
-        }
+        // Don't mark pending until the host confirms — the native confirmation
+        // modal blocks the UI anyway, and if the user cancels we'd otherwise
+        // leave the file stuck in the pending state until the next refresh.
+        vscode.postMessage({ scope: 'git', type: 'discard', repoId: repo.id, path: file.path, relPath: file.relPath });
         break;
       case 'diff':
         vscode.postMessage({ scope: 'git', type: 'openDiff', repoId: repo.id, path: file.path, staged: file.staged });
@@ -3316,6 +3515,7 @@
     return s;
   }
 
+  let lastRenderedChatId = '';
   function renderChatSession(id) {
     const s = chatSessions.get(id);
     if (!s) {
@@ -3324,7 +3524,13 @@
       $('chatMessages').innerHTML = '<div class="chat-empty-tabs">No chat selected.</div>';
       $('chatContext').style.display = 'none';
       $('pendingBar').innerHTML = '';
+      updateJumpButton();
       return;
+    }
+    if (lastRenderedChatId !== id) {
+      // Switching between chat tabs — start fresh at the latest message.
+      chatScrolledUp = false;
+      lastRenderedChatId = id;
     }
     $('chatTitle').textContent = s.title;
     $('chatFile').textContent = s.file ? '· ' + s.file : '';
@@ -3362,6 +3568,65 @@
     const arr = getPending(sessionId);
     arr.splice(idx, 1);
     renderPendingBar(sessionId);
+  }
+
+  // Scroll state: when the user scrolls away from the bottom we stop
+  // auto-scrolling on new content, so they can read earlier turns without
+  // being yanked back by streaming chunks.
+  let chatScrolledUp = false;
+  const SCROLL_AT_BOTTOM_PX = 24;
+
+  function isChatAtBottom() {
+    const el = $('chatMessages');
+    if (!el) return true;
+    return el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_AT_BOTTOM_PX;
+  }
+
+  function updateJumpButton() {
+    const btn = $('jumpToBottomBtn');
+    if (!btn) return;
+    btn.classList.toggle('visible', chatScrolledUp);
+  }
+
+  function scrollChatToBottom() {
+    const el = $('chatMessages');
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    chatScrolledUp = false;
+    updateJumpButton();
+  }
+
+  function maybeAutoScroll() {
+    if (!chatScrolledUp) {
+      const el = $('chatMessages');
+      if (el) el.scrollTop = el.scrollHeight;
+    }
+  }
+
+  // Strips an unclosed code fence so partial streaming markdown still renders
+  // cleanly. Without this, an open ``` swallows the rest of the assistant
+  // turn into a half-rendered code block.
+  function safeStreamingMd(text) {
+    const fenceCount = (text.match(/```/g) || []).length;
+    if (fenceCount % 2 === 1) return text + '\n```';
+    return text;
+  }
+
+  // Updates only the in-flight assistant bubble's body, avoiding the
+  // full re-render storm that flickers the chat on every chunk.
+  function updateStreamingBubble(s) {
+    const el = $('chatMessages');
+    if (!el) return;
+    let bubble = el.querySelector('.msg-streaming');
+    if (!bubble) {
+      // First chunk of this turn — render the full message list once so the
+      // streaming bubble appears at the right position.
+      renderChatMessages(s);
+      return;
+    }
+    const body = bubble.querySelector('.msg-body');
+    if (body) body.innerHTML = renderMarkdown(safeStreamingMd(s.streamingBuf));
+    maybeAutoScroll();
   }
 
   function renderChatMessages(s) {
@@ -3402,10 +3667,17 @@
     }
     // Streaming buffer for in-flight assistant
     if (s.streamingBuf) {
-      const stream = buildMsgElement({ role: 'assistant', text: s.streamingBuf, streaming: true });
+      const stream = buildMsgElement({
+        role: 'assistant',
+        text: safeStreamingMd(s.streamingBuf),
+        streaming: true,
+        formatted: true,
+      });
+      stream.classList.add('msg-streaming');
       el.appendChild(stream);
     }
-    el.scrollTop = el.scrollHeight;
+    maybeAutoScroll();
+    updateJumpButton();
   }
 
   function renderWelcome(container) {
@@ -3603,8 +3875,21 @@
     const body = document.createElement('div');
     body.className = 'msg-body';
 
-    const status = m.running ? 'running' : (m.ok === false ? 'err' : 'ok');
-    const statusLabel = m.running ? '◐ running' : (m.ok === false ? '✗ error' : '✓ done');
+    const awaiting = !!m.approval;
+    let status, statusLabel;
+    if (awaiting) {
+      status = 'awaiting';
+      statusLabel = '⚠ needs approval';
+    } else if (m.running) {
+      status = 'running';
+      statusLabel = '◐ running';
+    } else if (m.ok === false) {
+      status = 'err';
+      statusLabel = '✗ error';
+    } else {
+      status = 'ok';
+      statusLabel = '✓ done';
+    }
 
     const header = document.createElement('div');
     header.className = 'tool-header';
@@ -3629,6 +3914,40 @@
     });
 
     body.appendChild(header);
+
+    if (awaiting) {
+      const card = document.createElement('div');
+      card.className = 'approval-card';
+      const title = document.createElement('div');
+      title.className = 'approval-title';
+      title.textContent = m.approval.summary;
+      card.appendChild(title);
+      if (m.approval.detail) {
+        const det = document.createElement('div');
+        det.className = 'approval-detail';
+        det.textContent = m.approval.detail;
+        card.appendChild(det);
+      }
+      const actions = document.createElement('div');
+      actions.className = 'approval-actions';
+
+      const makeBtn = (label, decision, cls) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'approval-btn ' + cls;
+        b.textContent = label;
+        b.dataset.action = 'approval';
+        b.dataset.approvalId = m.approval.approvalId;
+        b.dataset.decision = decision;
+        return b;
+      };
+      actions.appendChild(makeBtn('Approve', 'approve', 'primary'));
+      actions.appendChild(makeBtn('Approve all this session', 'approveAll', 'secondary'));
+      actions.appendChild(makeBtn('Discard', 'deny', 'danger'));
+      card.appendChild(actions);
+      body.appendChild(card);
+    }
+
     body.appendChild(detail);
     div.appendChild(body);
     return div;
@@ -3776,6 +4095,47 @@
           m.result = payload.content;
           m.ok = payload.ok;
           m.running = false;
+          m.approval = null;
+          break;
+        }
+      }
+    } else if (payload.type === 'approvalRequest') {
+      // Attach the approval prompt to the matching tool card (most recent
+      // call with this callId). If no card exists yet, push a standalone one.
+      let attached = false;
+      for (let i = s.messages.length - 1; i >= 0; i--) {
+        const m = s.messages[i];
+        if (m.role === 'tool' && m.callId === payload.callId) {
+          m.approval = {
+            approvalId: payload.approvalId,
+            summary: payload.summary,
+            detail: payload.detail || '',
+          };
+          attached = true;
+          break;
+        }
+      }
+      if (!attached) {
+        s.messages.push({
+          role: 'tool',
+          callId: payload.callId || '',
+          name: payload.toolName,
+          input: {},
+          result: null,
+          ok: null,
+          running: true,
+          approval: {
+            approvalId: payload.approvalId,
+            summary: payload.summary,
+            detail: payload.detail || '',
+          },
+        });
+      }
+    } else if (payload.type === 'approvalCleared') {
+      for (let i = s.messages.length - 1; i >= 0; i--) {
+        const m = s.messages[i];
+        if (m.role === 'tool' && m.approval && m.approval.approvalId === payload.approvalId) {
+          m.approval = null;
           break;
         }
       }
@@ -3827,7 +4187,14 @@
     }
     // Re-render if this session is currently active
     if (activeSessionId() === payload.sessionId) {
-      renderChatSession(payload.sessionId);
+      if (payload.type === 'streamChunk') {
+        // Hot path: don't rebuild the whole DOM on every token, just patch
+        // the streaming bubble in place. Falls back to full render if the
+        // bubble doesn't exist yet.
+        updateStreamingBubble(s);
+      } else {
+        renderChatSession(payload.sessionId);
+      }
       if (payload.type === 'startAssistant') {
         $('chatSendBtn').disabled = true;
         $('chatStopBtn').style.display = '';
@@ -3981,12 +4348,15 @@
         }
       } else if (mode === 'file') {
         if (!it._path) { hide(); return; }
-        // Replace @query with empty (attachment is handled separately)
+        // Replace the @query fragment with the full @<rel-path> so it stays
+        // readable in the message. The extension will resolve it on send (and
+        // we also attach immediately for instant feedback).
         const before = val.slice(0, triggerStart);
         const after = val.slice(caret);
-        const joiner = before && !before.endsWith(' ') ? ' ' : '';
-        ta.value = before + joiner + after;
-        const pos = before.length + joiner.length;
+        const insert = '@' + it._path;
+        const trailing = after.startsWith(' ') || after.length === 0 ? '' : ' ';
+        ta.value = before + insert + trailing + after;
+        const pos = before.length + insert.length + trailing.length;
         ta.setSelectionRange(pos, pos);
         const id = activeSessionId();
         if (id) {
@@ -4081,6 +4451,10 @@
     pendingImages.set(id, []);
     renderPendingBar(id);
     autosizeChatInput();
+    // Sending a new message implies the user wants to see the response, so
+    // unlock auto-scroll regardless of where they were reading before.
+    chatScrolledUp = false;
+    updateJumpButton();
     vscode.postMessage({
       scope: 'chat',
       sessionId: id,
@@ -4217,10 +4591,37 @@
       if (!Number.isNaN(ord)) beginEditUserMessage(editBtn.closest('.msg'), ord);
       return;
     }
+    const apvBtn = e.target.closest('[data-action="approval"]');
+    if (apvBtn) {
+      e.stopPropagation();
+      const id = activeSessionId();
+      const approvalId = apvBtn.dataset.approvalId;
+      const decision = apvBtn.dataset.decision;
+      if (id && approvalId && decision) {
+        vscode.postMessage({
+          scope: 'chat',
+          sessionId: id,
+          type: 'approvalResponse',
+          approvalId,
+          decision,
+        });
+      }
+      return;
+    }
     const item = e.target.closest('.history-item');
     if (item && item.dataset.id) {
       vscode.postMessage({ scope: 'history', type: 'resume', entryId: item.dataset.id });
     }
+  });
+
+  $('chatMessages').addEventListener('scroll', () => {
+    const wasUp = chatScrolledUp;
+    chatScrolledUp = !isChatAtBottom();
+    if (wasUp !== chatScrolledUp) updateJumpButton();
+  });
+
+  $('jumpToBottomBtn').addEventListener('click', () => {
+    scrollChatToBottom();
   });
 
   $('imageModal').addEventListener('click', closeImageModal);
@@ -4293,6 +4694,10 @@
           outputLanguage: msg.outputLanguage || 'English',
           supportedLanguages: msg.supportedLanguages || ['English'],
           includeFullFile: msg.includeFullFile !== false,
+          allowWriteTools: !!msg.allowWriteTools,
+          showDiffPreview: msg.showDiffPreview !== false,
+          allowShell: !!msg.allowShell,
+          shellAutoApprove: Array.isArray(msg.shellAutoApprove) ? msg.shellAutoApprove : [],
           features: msg.features || {},
           featureList: msg.featureList || [],
         };

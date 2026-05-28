@@ -7,16 +7,22 @@ import * as log from '../util/logger';
 import { delegateResearchTool } from './delegate';
 import { editFileTool } from './editFile';
 import { findFilesTool } from './findFiles';
+import { findReferencesTool } from './findReferences';
+import { findSymbolTool } from './findSymbol';
 import { getOpenTabsTool } from './getOpenTabs';
 import { getSelectionTool } from './getSelection';
 import { gitLogTool } from './gitLog';
+import { gotoDefinitionTool } from './gotoDefinition';
 import { grepTool } from './grep';
 import { listDirTool } from './listDir';
+import { listMemoryTool } from './listMemory';
 import { loadSkillTool } from './loadSkill';
 import { readFileTool } from './readFile';
+import { readMemoryTool } from './readMemory';
 import { runCommandTool } from './runCommand';
 import type { Tool, ToolExecutionContext, ToolResult } from './types';
 import { writeFileTool } from './writeFile';
+import { writeMemoryTool } from './writeMemory';
 
 const TOOLS: Record<string, Tool> = {
   read_file: readFileTool,
@@ -26,11 +32,17 @@ const TOOLS: Record<string, Tool> = {
   git_log: gitLogTool,
   get_open_tabs: getOpenTabsTool,
   get_selection: getSelectionTool,
+  find_symbol: findSymbolTool,
+  goto_definition: gotoDefinitionTool,
+  find_references: findReferencesTool,
   delegate_research: delegateResearchTool,
   write_file: writeFileTool,
   edit_file: editFileTool,
   load_skill: loadSkillTool,
   run_command: runCommandTool,
+  read_memory: readMemoryTool,
+  write_memory: writeMemoryTool,
+  list_memory: listMemoryTool,
 };
 
 // Tools available to a sub-agent (no delegation, no destructive ops).
@@ -42,7 +54,12 @@ const SUBAGENT_TOOL_NAMES: Set<string> = new Set([
   'git_log',
   'get_open_tabs',
   'get_selection',
+  'find_symbol',
+  'goto_definition',
+  'find_references',
   'load_skill',
+  'read_memory',
+  'list_memory',
 ]);
 
 let mcpManagerRef: McpManager | null = null;
