@@ -1438,6 +1438,10 @@
           <input id="showDiffPreview" type="checkbox" style="margin-left: auto;">
         </div>
         <div class="setting-row">
+          <label for="editFileAutoRetry" class="label" title="When edit_file fails because its find text no longer matches, retry once with the latest file content.">Auto-retry failed edit_file once with fresh file content</label>
+          <input id="editFileAutoRetry" type="checkbox" style="margin-left: auto;">
+        </div>
+        <div class="setting-row">
           <label for="allowShell" class="label" title="Let the AI run shell commands via run_command. Each call asks for approval unless the command matches the auto-approve list. Off by default — review carefully.">Allow AI to run shell commands</label>
           <input id="allowShell" type="checkbox" style="margin-left: auto;">
         </div>
@@ -2101,6 +2105,7 @@
     includeFullFile: true,
     allowWriteTools: true,
     showDiffPreview: true,
+    editFileAutoRetry: true,
     allowShell: true,
     shellAutoApprove: [],
     features: {},
@@ -2283,6 +2288,7 @@
     $('includeFullFile').checked = !!configState.includeFullFile;
     $('allowWriteTools').checked = !!configState.allowWriteTools;
     $('showDiffPreview').checked = !!configState.showDiffPreview;
+    $('editFileAutoRetry').checked = !!configState.editFileAutoRetry;
     $('allowShell').checked = !!configState.allowShell;
     const shellTa = $('shellAutoApprove');
     if (document.activeElement !== shellTa) {
@@ -2290,6 +2296,9 @@
     }
     const shellBlock = $('shellAutoApproveBlock');
     if (shellBlock) shellBlock.style.display = configState.allowShell ? '' : 'none';
+    const retryRow = $('editFileAutoRetry').closest('.setting-row');
+    if (retryRow) retryRow.style.opacity = configState.allowWriteTools ? '' : '0.55';
+    $('editFileAutoRetry').disabled = !configState.allowWriteTools;
     const diffRow = $('showDiffPreview').closest('.setting-row');
     if (diffRow) diffRow.style.opacity = configState.allowWriteTools ? '' : '0.55';
     $('showDiffPreview').disabled = !configState.allowWriteTools;
@@ -2615,6 +2624,10 @@
 
   $('showDiffPreview').addEventListener('change', (e) => {
     vscode.postMessage({ scope: 'config', type: 'setShowDiffPreview', value: e.target.checked });
+  });
+
+  $('editFileAutoRetry').addEventListener('change', (e) => {
+    vscode.postMessage({ scope: 'config', type: 'setEditFileAutoRetry', value: e.target.checked });
   });
 
   $('allowShell').addEventListener('change', (e) => {
@@ -4696,6 +4709,7 @@
           includeFullFile: msg.includeFullFile !== false,
           allowWriteTools: !!msg.allowWriteTools,
           showDiffPreview: msg.showDiffPreview !== false,
+          editFileAutoRetry: !!msg.editFileAutoRetry,
           allowShell: !!msg.allowShell,
           shellAutoApprove: Array.isArray(msg.shellAutoApprove) ? msg.shellAutoApprove : [],
           features: msg.features || {},

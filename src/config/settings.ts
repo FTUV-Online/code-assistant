@@ -111,6 +111,18 @@ export function getShowDiffPreview(): boolean {
   );
 }
 
+export function getEditFileAutoRetry(): boolean {
+  return (
+    vscode.workspace.getConfiguration(NS).get<boolean>('toolUse.editFileAutoRetry') ?? false
+  );
+}
+
+export async function setEditFileAutoRetry(value: boolean): Promise<void> {
+  await vscode.workspace
+    .getConfiguration(NS)
+    .update('toolUse.editFileAutoRetry', value, vscode.ConfigurationTarget.Global);
+}
+
 export async function setAllowWriteTools(value: boolean): Promise<void> {
   await vscode.workspace
     .getConfiguration(NS)

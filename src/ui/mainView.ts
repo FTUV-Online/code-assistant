@@ -8,6 +8,7 @@ import {
   getActiveProviderId,
   getAllowShell,
   getAllowWriteTools,
+  getEditFileAutoRetry,
   getFeatures,
   getIncludeFullFile,
   getMcpDisabledTools,
@@ -19,6 +20,7 @@ import {
   setActiveProviderId,
   setAllowShell,
   setAllowWriteTools,
+  setEditFileAutoRetry,
   setEnabled,
   setFeature,
   setIncludeFullFile,
@@ -151,6 +153,7 @@ type Inbound =
   | { scope: 'config'; type: 'setIncludeFullFile'; value: boolean }
   | { scope: 'config'; type: 'setAllowWriteTools'; value: boolean }
   | { scope: 'config'; type: 'setShowDiffPreview'; value: boolean }
+  | { scope: 'config'; type: 'setEditFileAutoRetry'; value: boolean }
   | { scope: 'config'; type: 'setAllowShell'; value: boolean }
   | { scope: 'config'; type: 'setShellAutoApprove'; value: string[] }
   | { scope: 'config'; type: 'setFeatureEnabled'; feature: FeatureName; value: boolean }
@@ -195,6 +198,7 @@ type Outbound =
       includeFullFile: boolean;
       allowWriteTools: boolean;
       showDiffPreview: boolean;
+      editFileAutoRetry: boolean;
       allowShell: boolean;
       shellAutoApprove: string[];
       features: FeaturesMap;
@@ -936,6 +940,10 @@ export class MainViewProvider implements vscode.WebviewViewProvider {
         await setShowDiffPreview(msg.value);
         await this.postConfigState();
         return;
+      case 'setEditFileAutoRetry':
+        await setEditFileAutoRetry(msg.value);
+        await this.postConfigState();
+        return;
       case 'setAllowShell':
         await setAllowShell(msg.value);
         await this.postConfigState();
@@ -1303,6 +1311,7 @@ export class MainViewProvider implements vscode.WebviewViewProvider {
       includeFullFile: getIncludeFullFile(),
       allowWriteTools: getAllowWriteTools(),
       showDiffPreview: getShowDiffPreview(),
+      editFileAutoRetry: getEditFileAutoRetry(),
       allowShell: getAllowShell(),
       shellAutoApprove: getShellAutoApprove(),
       features: getFeatures(),

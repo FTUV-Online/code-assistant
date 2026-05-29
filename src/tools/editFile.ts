@@ -11,6 +11,11 @@ type Input = {
   edits?: FindReplace[];
 };
 
+function fullDocumentRange(document: vscode.TextDocument): vscode.Range {
+  const lastLine = Math.max(0, document.lineCount - 1);
+  return new vscode.Range(0, 0, lastLine, document.lineAt(lastLine).text.length);
+}
+
 export const editFileTool: Tool = {
   destructive: true,
   gateFlag: 'allowWriteTools',
@@ -18,7 +23,9 @@ export const editFileTool: Tool = {
     name: 'edit_file',
     description:
       'Make precise find/replace edits to an existing file. By default each "find" must match ' +
-      'exactly once (include enough surrounding context to be unambiguous). For symbol renames or ' +
+      'exactly once (include enough surrounding context to be unambiguous). The matcher tolerates ' +
+      'LF vs CRLF line endings and trailing spaces at end of lines, but still expects a specific ' +
+      'snippet rather than short generic tokens like a lone closing tag. For symbol renames or ' +
       'version bumps where the same token appears repeatedly, set "replaceAll": true on that edit ' +
       'to update every occurrence in one shot — this is the preferred pattern over multiple edits ' +
       'with extra context. Asks the user for approval before writing.',
@@ -35,7 +42,12 @@ export const editFileTool: Tool = {
           items: {
             type: 'object',
             properties: {
-              find: { type: 'string', description: 'Exact text to find (verbatim, including whitespace).' },
+              find: {
+                type: 'string',
+                minLength: 1,
+                description:
+                  'Text to find. Matching is exact except for LF/CRLF differences and trailing spaces at line ends. Include enough surrounding context to make the snippet unique.',
+              },
               replace: { type: 'string', description: 'Replacement text.' },
               replaceAll: {
                 type: 'boolean',
@@ -122,14 +134,26 @@ export const editFileTool: Tool = {
     }
 
     try {
-      await vscode.workspace.fs.writeFile(
-        vscode.Uri.file(abs),
-        new TextEncoder().encode(applied.result),
-      );
+      const uri = vscode.Uri.file(abs);
+      const document = await vscode.workspace.openTextDocument(uri);
+      const edit = new vscode.WorkspaceEdit();
+      edit.replace(uri, fullDocumentRange(document), applied.result);
+      const appliedToWorkspace = await vscode.workspace.applyEdit(edit);
+      if (!appliedToWorkspace) {
+        return {
+          content: `Error applying edit to "${relPath}" in the VS Code workspace.`,
+          isError: true,
+        };
+      }
+      const saved = document.isDirty ? await document.save() : true;
+      if (!saved) {
+        return {
+          content: `Error saving "${relPath}" after applying edits.`,
+          isError: true,
+        };
+      }
       return {
-        content: `OK: applied ${applied.appliedCount} edits to ${relPath} (net ${
-          applied.result.length - original.length >= 0 ? '+' : ''
-        }${applied.result.length - original.length} chars).`,
+        content: `OK: applied ${applied.appliedCount} edits to ${relPath} (net ${netDelta >= 0 ? '+' : ''}${netDelta} chars).`,
       };
     } catch (err) {
       return {
@@ -139,3 +163,4 @@ export const editFileTool: Tool = {
     }
   },
 };
+

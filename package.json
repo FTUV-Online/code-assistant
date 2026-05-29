@@ -307,6 +307,11 @@
           "default": true,
           "description": "Open a side-by-side diff editor before approving write_file / edit_file calls so you can review the exact change. Disable to fall back to a text-only summary."
         },
+        "devCode.toolUse.editFileAutoRetry": {
+          "type": "boolean",
+          "default": false,
+          "description": "When edit_file fails because its find strings no longer match the file, automatically re-read the latest file content and give the AI one retry. Default off."
+        },
         "devCode.toolUse.allowShell": {
           "type": "boolean",
           "default": true,

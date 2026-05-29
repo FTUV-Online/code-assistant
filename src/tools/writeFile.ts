@@ -13,6 +13,11 @@ type Input = {
   content?: string;
 };
 
+function fullDocumentRange(document: vscode.TextDocument): vscode.Range {
+  const lastLine = Math.max(0, document.lineCount - 1);
+  return new vscode.Range(0, 0, lastLine, document.lineAt(lastLine).text.length);
+}
+
 export const writeFileTool: Tool = {
   destructive: true,
   gateFlag: 'allowWriteTools',
@@ -58,11 +63,12 @@ export const writeFileTool: Tool = {
       return { content: `Error: "${relPath}" is blacklisted.`, isError: true };
     }
 
+    const uri = vscode.Uri.file(abs);
     let exists = false;
     let originalContent = '';
     let originalIsBinary = false;
     try {
-      const bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(abs));
+      const bytes = await vscode.workspace.fs.readFile(uri);
       exists = true;
       if (isBinary(bytes)) {
         originalIsBinary = true;
@@ -110,17 +116,34 @@ export const writeFileTool: Tool = {
     }
 
     try {
-      // Ensure parent dir exists
       const dir = path.dirname(abs);
       try {
         await vscode.workspace.fs.createDirectory(vscode.Uri.file(dir));
       } catch {
         /* may already exist */
       }
-      await vscode.workspace.fs.writeFile(
-        vscode.Uri.file(abs),
-        new TextEncoder().encode(content),
-      );
+
+      if (!exists) {
+        await vscode.workspace.fs.writeFile(uri, new Uint8Array());
+      }
+
+      const document = await vscode.workspace.openTextDocument(uri);
+      const edit = new vscode.WorkspaceEdit();
+      edit.replace(uri, fullDocumentRange(document), content);
+      const appliedToWorkspace = await vscode.workspace.applyEdit(edit);
+      if (!appliedToWorkspace) {
+        return {
+          content: `Error applying write to "${relPath}" in the VS Code workspace.`,
+          isError: true,
+        };
+      }
+      const saved = document.isDirty ? await document.save() : true;
+      if (!saved) {
+        return {
+          content: `Error saving "${relPath}" after applying content.`,
+          isError: true,
+        };
+      }
       return { content: `OK: ${verb}d ${relPath} (${content.length} chars)` };
     } catch (err) {
       return {

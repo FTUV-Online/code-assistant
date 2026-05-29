@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import {
   getActiveProviderId,
+  getEditFileAutoRetry,
   getFeatureProviderId,
   getIncludeFullFile,
   getOutputLanguage,
@@ -23,7 +24,8 @@ import type {
 import { getProviderById } from '../providers/manager';
 import { estimateCostUsd } from '../providers/pricing';
 import { buildMemoryPromptSection } from '../memory/manager';
-import { matchesAnyGlob, resolveSafePath } from '../tools/common';
+import { isBinary, matchesAnyGlob, resolveSafePath } from '../tools/common';
+import { isRetryableEditMatchError } from '../tools/editLogic';
 import {
   executeTool,
   getAllToolDefs,
@@ -37,6 +39,8 @@ import * as log from '../util/logger';
 export type SessionKind = 'explain' | 'review' | 'rewrite' | 'chat';
 export type CodeAnalysisKind = 'explain' | 'review' | 'rewrite';
 
+const MAX_RETRY_FILE_CHARS = 20_000;
+
 async function isReadableFile(absPath: string): Promise<boolean> {
   try {
     const stat = await vscode.workspace.fs.stat(vscode.Uri.file(absPath));
@@ -44,6 +48,31 @@ async function isReadableFile(absPath: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function readFreshRetryFile(relPath: string, workspaceRoot: string): Promise<string | null> {
+  const abs = resolveSafePath(workspaceRoot, relPath);
+  if (!abs) return null;
+
+  try {
+    const bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(abs));
+    if (isBinary(bytes)) return null;
+    const text = new TextDecoder().decode(bytes);
+    return text.length > MAX_RETRY_FILE_CHARS
+      ? text.slice(0, MAX_RETRY_FILE_CHARS) + '\n... [truncated]'
+      : text;
+  } catch {
+    return null;
+  }
+}
+
+function buildEditRetryMessage(relPath: string, content: string): string {
+  return (
+    `The edit_file call failed because its find strings did not match the current file content. ` +
+    `Retry exactly once using the latest contents of \`${relPath}\` below. ` +
+    `Use new find strings that match this file exactly, and do not repeat the previous failing edit unchanged.\n\n` +
+    `\`\`\`\n${content}\n\`\`\``
+  );
 }
 
 export type HistoryEntry = {
@@ -1038,6 +1067,7 @@ export class ChatSession {
     const maxIters = getToolUseMaxIterations();
     const MAX_AUTO_CONTINUE = 2;
     let autoContinueCount = 0;
+    let editFileRetried = false;
     await ensureMemoryPromptLoaded();
 
     for (let iter = 0; iter < maxIters; iter++) {
@@ -1119,6 +1149,7 @@ export class ChatSession {
       // Execute each tool, post result, append to history
       const toolCtx = this.buildToolContext(ctrl.signal, provider);
       const toolResults: ToolResultBlock[] = [];
+      let retryFilePath: string | null = null;
       for (const tu of turnToolUses) {
         if (ctrl.signal.aborted) break;
         const result = await withAbort(
@@ -1142,9 +1173,35 @@ export class ChatSession {
           content: result.content,
           ok: !result.isError,
         });
+
+        if (
+          !editFileRetried &&
+          getEditFileAutoRetry() &&
+          tu.name === 'edit_file' &&
+          result.isError &&
+          isRetryableEditMatchError(result.content)
+        ) {
+          const input = (tu.input ?? {}) as { path?: unknown };
+          if (typeof input.path === 'string' && input.path.length > 0) {
+            retryFilePath = input.path;
+            break;
+          }
+        }
       }
       if (toolResults.length > 0) {
         this.messages.push({ role: 'user', content: toolResults });
+      }
+      if (retryFilePath) {
+        const freshContent = await readFreshRetryFile(retryFilePath, toolCtx.workspaceRoot);
+        if (freshContent !== null) {
+          editFileRetried = true;
+          this.messages.push({
+            role: 'user',
+            content: buildEditRetryMessage(retryFilePath, freshContent),
+          });
+          this.postContext();
+          continue;
+        }
       }
       this.postContext();
     }
