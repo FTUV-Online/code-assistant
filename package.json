@@ -2,7 +2,7 @@
   "name": "dev-code",
   "displayName": "dev-code",
   "description": "Open-source code completion. Use any provider compatible with Anthropic, OpenAI, Gemini, or Ollama.",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "publisher": "dev-code",
   "license": "MIT",
   "repository": {
