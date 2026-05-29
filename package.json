@@ -2,7 +2,7 @@
   "name": "dev-code",
   "displayName": "dev-code",
   "description": "Open-source code completion. Use any provider compatible with Anthropic, OpenAI, Gemini, or Ollama.",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "publisher": "dev-code",
   "license": "MIT",
   "repository": {
@@ -10,7 +10,7 @@
     "url": "https://github.com/your-username/dev-code.git"
   },
   "engines": {
-    "vscode": "^1.85.0"
+    "vscode": "^1.122.1"
   },
   "categories": [
     "Programming Languages",
@@ -319,7 +319,9 @@
         },
         "devCode.toolUse.shellAutoApprove": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "description": "Command prefixes that auto-approve without prompting. Example: [\"npm\", \"git status\", \"dotnet test\"]. Commands containing shell operators (&, |, ;, >, $(, etc.) are NEVER auto-approved regardless of this list."
         },
@@ -339,7 +341,11 @@
             "properties": {
               "transport": {
                 "type": "string",
-                "enum": ["stdio", "streamable-http", "websocket"],
+                "enum": [
+                  "stdio",
+                  "streamable-http",
+                  "websocket"
+                ],
                 "description": "Transport type. Defaults to 'stdio' if omitted (backward compatible)."
               },
               "command": {
@@ -348,12 +354,16 @@
               },
               "args": {
                 "type": "array",
-                "items": { "type": "string" },
+                "items": {
+                  "type": "string"
+                },
                 "description": "Arguments passed to the command (stdio transport)."
               },
               "env": {
                 "type": "object",
-                "additionalProperties": { "type": "string" },
+                "additionalProperties": {
+                  "type": "string"
+                },
                 "description": "Extra environment variables for the server process (stdio transport)."
               },
               "url": {
@@ -362,7 +372,9 @@
               },
               "headers": {
                 "type": "object",
-                "additionalProperties": { "type": "string" },
+                "additionalProperties": {
+                  "type": "string"
+                },
                 "description": "Custom HTTP headers sent with every request (streamable-http transport)."
               }
             }
@@ -374,7 +386,9 @@
           "description": "Disabled MCP tools per server. Key is server name, value is array of tool names to hide from the AI.",
           "additionalProperties": {
             "type": "array",
-            "items": { "type": "string" }
+            "items": {
+              "type": "string"
+            }
           }
         },
         "devCode.toolUse.blacklist": {
@@ -516,12 +530,12 @@
     "vscode:prepublish": "npm run compile"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
-    "@types/vscode": "^1.85.0",
-    "@vscode/vsce": "^3.2.0",
+    "@types/node": "^25.9.1",
+    "@types/vscode": "^1.120.0",
+    "@vscode/vsce": "^3.9.1",
     "esbuild": "^0.28.0",
-    "tsx": "^4.19.0",
-    "typescript": "^5.4.0"
+    "tsx": "^4.22.3",
+    "typescript": "^6.0.3"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0"
