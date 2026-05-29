@@ -7,7 +7,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-username/dev-code.git"
+    "url": "https://github.com/FTUV-Online/code-assistant.git"
   },
   "engines": {
     "vscode": "^1.122.1"

@@ -1,55 +1,55 @@
 # dev-code
 
-> Open-source code completion extension cho VS Code — hỗ trợ nhiều LLM provider, không khóa nhà cung cấp.
+> Open-source code completion extension for VS Code — multi-provider, no vendor lock-in.
 
-**dev-code** là extension gợi ý code inline (ghost text) tương tự GitHub Copilot, nhưng:
+**dev-code** is an inline code suggestion (ghost text) extension similar to GitHub Copilot, but:
 - 100% open source
-- Người dùng tự chọn provider: **Anthropic Claude**, **OpenAI**, **Google Gemini**, **Ollama**, hoặc bất kỳ endpoint nào tương thích OpenAI / Anthropic API
-- Không cần backend trung gian — extension gọi thẳng tới provider
-- API key lưu an toàn trong VS Code SecretStorage
+- You pick the provider: **Anthropic Claude**, **OpenAI**, **Google Gemini**, **Ollama**, or any endpoint compatible with the OpenAI / Anthropic API
+- No middleman backend — the extension talks directly to the provider
+- API keys are stored securely in VS Code SecretStorage
 
-## Trạng thái
+## Status
 
-🚧 **Pre-alpha** — Phase 1 skeleton đã code xong (Anthropic adapter), chưa test với API thật. Xem [ROADMAP.md](./ROADMAP.md) để biết tiến độ.
+🚧 **Pre-alpha** — Phase 1 skeleton is in place (Anthropic adapter), not yet tested against the live API. See [ROADMAP.md](./ROADMAP.md) for progress.
 
-## Tính năng dự kiến
+## Planned features
 
-- [x] Thiết kế kiến trúc đa provider qua protocol adapter
-- [x] Inline completion (ghost text) — accept bằng `Tab` *(scaffold, cần test runtime)*
-- [x] Streaming response *(Anthropic SSE)*
+- [x] Multi-provider architecture via protocol adapters
+- [x] Inline completion (ghost text) — accept with `Tab` *(scaffold, runtime test pending)*
+- [x] Streaming responses *(Anthropic SSE)*
 - [ ] Multi-file context
-- [ ] Chat panel với commands `/explain`, `/fix`, `/test`
+- [ ] Chat panel with `/explain`, `/fix`, `/test` commands
 - [ ] Workspace indexing (RAG)
 
-## Provider được hỗ trợ
+## Supported providers
 
-| Protocol | Bao phủ |
+| Protocol | Coverage |
 |---|---|
-| **Anthropic-compatible** | Claude (chính chủ), AWS Bedrock proxy, Vertex AI proxy, LiteLLM, custom proxy |
+| **Anthropic-compatible** | Claude (first-party), AWS Bedrock proxy, Vertex AI proxy, LiteLLM, custom proxy |
 | **OpenAI-compatible** | OpenAI, Azure OpenAI, OpenRouter, Groq, Together AI, DeepSeek, Fireworks, Mistral, LM Studio, vLLM, LocalAI, Ollama (`/v1`), xAI Grok, custom proxy |
 | **Gemini native** | Google AI Studio |
-| **Ollama native** | Endpoint `/api/generate` (hỗ trợ FIM tốt hơn cho code completion) |
+| **Ollama native** | `/api/generate` endpoint (better FIM support for code completion) |
 
-## Phát triển
+## Development
 
 ```bash
 npm install
-npm run compile        # build vào out/
+npm run compile        # build into out/
 npm run watch          # dev mode, auto rebuild
 ```
 
-Trong VS Code, mở folder rồi nhấn **F5** để chạy **Extension Development Host** — một cửa sổ VS Code mới sẽ mở với extension đã được nạp.
+In VS Code, open the folder and press **F5** to launch the **Extension Development Host** — a new VS Code window opens with the extension loaded.
 
-Trong cửa sổ Extension Host:
-1. Mở Command Palette (`Ctrl+Shift+P`) → chạy **dev-code: Setup Provider**
-2. Chọn preset (Anthropic chính chủ hoặc custom endpoint)
-3. Nhập tên provider, base URL, model, API key
-4. Mở 1 file code bất kỳ → bắt đầu gõ → ghost text sẽ hiện ra
+Inside the Extension Host window:
+1. Open the Command Palette (`Ctrl+Shift+P`) → run **dev-code: Setup Provider**
+2. Pick a preset (first-party Anthropic or a custom endpoint)
+3. Enter provider name, base URL, model, and API key
+4. Open any code file → start typing → ghost text will appear
 
-## Tài liệu
+## Documentation
 
-- [ROADMAP.md](./ROADMAP.md) — Lộ trình phát triển theo phase
-- [DESIGN.md](./DESIGN.md) — Kiến trúc và quyết định thiết kế
+- [ROADMAP.md](./ROADMAP.md) — Development roadmap by phase
+- [DESIGN.md](./DESIGN.md) — Architecture and design decisions
 
 ## License
 
