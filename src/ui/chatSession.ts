@@ -182,6 +182,8 @@ export type ChatContextInfo = {
   estimatedCostUsd?: number;
   lastTurnInputTokens?: number;
   lastTurnOutputTokens?: number;
+  lastTurnInputChars?: number;
+  lastTurnOutputChars?: number;
   lastTurnCostUsd?: number;
   imageCount: number;
   source: string;
@@ -272,6 +274,12 @@ export class ChatSession {
     cacheReadInputTokens?: number;
     estimatedCostUsd: number;
   } | null = null;
+  private lastTurnInputChars = 0;
+  private lastTurnOutputChars = 0;
+  // Snapshots taken before the user message is pushed/modified,
+  // so the delta for last-turn estimates includes the user message.
+  private pendingTurnInputChars: number | null = null;
+  private pendingTurnOutputChars: number | null = null;
 
   constructor(
     id: string,
@@ -319,6 +327,10 @@ export class ChatSession {
 
     this.attachments = [];
     this.source = 'diff';
+
+    // Snapshot before adding the user message so last-turn estimate works.
+    this.pendingTurnInputChars = this.computeContextInputChars();
+    this.pendingTurnOutputChars = this.computeContextOutputChars();
     this.messages = [
       {
         role: 'user',
@@ -364,6 +376,10 @@ export class ChatSession {
 
     this.attachments = [];
     this.source = `selection (${rangeLabel})`;
+
+    // Snapshot before adding the user message so last-turn estimate works.
+    this.pendingTurnInputChars = this.computeContextInputChars();
+    this.pendingTurnOutputChars = this.computeContextOutputChars();
 
     const verb =
       this.kind === 'explain' ? 'explain' : this.kind === 'review' ? 'review' : 'rewrite';
@@ -478,6 +494,10 @@ export class ChatSession {
     const wasEmpty = this.messages.length === 0;
 
     if (trimmed) await this.resolveAndAttachMentions(trimmed);
+
+    // Snapshot before adding the user message so last-turn estimate works.
+    this.pendingTurnInputChars = this.computeContextInputChars();
+    this.pendingTurnOutputChars = this.computeContextOutputChars();
 
     if (attachments.length === 0) {
       this.messages.push({ role: 'user', content: trimmed });
@@ -689,6 +709,9 @@ export class ChatSession {
       this.post({ type: 'error', sessionId: this.id, message: 'Cannot edit: message not found.' });
       return;
     }
+    // Snapshot before editing the user message so last-turn estimate works.
+    this.pendingTurnInputChars = this.computeContextInputChars();
+    this.pendingTurnOutputChars = this.computeContextOutputChars();
     const trimmed = newText.trim();
     if (!trimmed) return;
     const target = this.messages[backendIdx];
@@ -721,6 +744,8 @@ export class ChatSession {
       return;
     }
     this.messages = this.messages.slice(0, lastIdx);
+    this.pendingTurnInputChars = this.computeContextInputChars();
+    this.pendingTurnOutputChars = this.computeContextOutputChars();
     this.post({ type: 'rewindMessage', sessionId: this.id });
     this.postContext();
     await this.streamReply();
@@ -820,11 +845,22 @@ export class ChatSession {
         useTools,
       });
 
+      // Use snapshot taken before the caller pushed/modified messages.
+      // Fall back to current counts when called without a snapshot (e.g. regenerate).
+      const prevInputChars = this.pendingTurnInputChars ?? this.computeContextInputChars();
+      const prevOutputChars = this.pendingTurnOutputChars ?? this.computeContextOutputChars();
+      this.pendingTurnInputChars = null;
+      this.pendingTurnOutputChars = null;
+
       if (useTools) {
         await this.streamWithTools(provider, ctrl);
       } else {
         await this.streamPlain(provider, ctrl);
       }
+
+      // Char delta for this turn (fallback when provider doesn't report tokens).
+      this.lastTurnInputChars = Math.max(0, this.computeContextInputChars() - prevInputChars);
+      this.lastTurnOutputChars = Math.max(0, this.computeContextOutputChars() - prevOutputChars);
     } catch (err) {
       if (!ctrl.signal.aborted) {
         const m = err instanceof Error ? err.message : String(err);
@@ -1213,47 +1249,82 @@ export class ChatSession {
     this.post({ type: 'context', sessionId: this.id, info: this.getContextInfo() });
   }
 
+  private computeContextInputChars(): number {
+    let chars = this.systemPrompt.length;
+    for (const m of this.messages) {
+      if (m.role === 'assistant') continue;
+      chars += this.computeMessageChars(m);
+    }
+    return chars;
+  }
+
+  private computeContextOutputChars(): number {
+    let chars = 0;
+    for (const m of this.messages) {
+      if (m.role !== 'assistant') continue;
+      chars += this.computeMessageChars(m);
+    }
+    return chars;
+  }
+
+  private computeMessageChars(m: ChatMessage): number {
+    if (typeof m.content === 'string') return m.content.length;
+    let total = 0;
+    for (const b of m.content) {
+      if (b.type === 'text') total += b.text.length;
+      else if (b.type === 'tool_result') total += b.content.length;
+      else if (b.type === 'tool_use') total += JSON.stringify(b.input ?? {}).length;
+    }
+    return total;
+  }
+
   private getContextInfo(): ChatContextInfo {
     const turns = Math.max(0, Math.floor((this.messages.length - 1) / 2));
-    let inputChars = this.systemPrompt.length;
-    let outputChars = 0;
+    const inputChars = this.computeContextInputChars();
+    const outputChars = this.computeContextOutputChars();
     let imageCount = 0;
     for (const m of this.messages) {
-      if (typeof m.content === 'string') {
-        if (m.role === 'assistant') outputChars += m.content.length;
-        else inputChars += m.content.length;
-      } else {
+      if (typeof m.content !== 'string') {
         for (const b of m.content) {
-          if (b.type === 'text') {
-            if (m.role === 'assistant') outputChars += b.text.length;
-            else inputChars += b.text.length;
-          } else if (b.type === 'tool_result') {
-            inputChars += b.content.length;
-          } else if (b.type === 'tool_use') {
-            outputChars += JSON.stringify(b.input ?? {}).length;
-          } else if (b.type === 'image') {
-            imageCount++;
-          }
+          if (b.type === 'image') imageCount++;
         }
       }
     }
     const imageTokens = imageCount * 1500;
     const configs = getProviderConfigs();
-    const hasReal = this.cumulativeUsage.inputTokens > 0 || this.cumulativeUsage.outputTokens > 0;
+    // Only expose provider-reported values when they are > 0.
+    // Many proxies / local models report output but not input (or 0 for input).
+    // By leaving undefined when 0, the webview falls back to its char/4 estimate
+    // for that specific field — avoiding "0 tok in" when the provider didn't report.
+    const hasRealInput = this.cumulativeUsage.inputTokens > 0;
+    const hasRealOutput = this.cumulativeUsage.outputTokens > 0;
     return {
       turns,
       inputChars,
       outputChars,
       inputTokens: Math.ceil(inputChars / 4) + imageTokens,
       outputTokens: Math.ceil(outputChars / 4),
-      realInputTokens: hasReal ? this.cumulativeUsage.inputTokens : undefined,
-      realOutputTokens: hasReal ? this.cumulativeUsage.outputTokens : undefined,
+      realInputTokens: hasRealInput ? this.cumulativeUsage.inputTokens : undefined,
+      realOutputTokens: hasRealOutput ? this.cumulativeUsage.outputTokens : undefined,
       cacheCreationInputTokens:
         this.cumulativeUsage.cacheCreationInputTokens || undefined,
       cacheReadInputTokens: this.cumulativeUsage.cacheReadInputTokens || undefined,
-      estimatedCostUsd: hasReal ? this.cumulativeUsage.estimatedCostUsd : undefined,
-      lastTurnInputTokens: this.lastTurnUsage?.inputTokens,
-      lastTurnOutputTokens: this.lastTurnUsage?.outputTokens,
+      estimatedCostUsd:
+      this.cumulativeUsage.estimatedCostUsd > 0
+        ? this.cumulativeUsage.estimatedCostUsd
+        : undefined,
+      // Only expose last-turn values when the provider reported > 0.
+      // (A 0 means the provider didn't report that field.)
+      lastTurnInputTokens:
+        (this.lastTurnUsage?.inputTokens || 0) > 0
+          ? this.lastTurnUsage!.inputTokens
+          : undefined,
+      lastTurnOutputTokens:
+        (this.lastTurnUsage?.outputTokens || 0) > 0
+          ? this.lastTurnUsage!.outputTokens
+          : undefined,
+      lastTurnInputChars: this.lastTurnInputChars,
+      lastTurnOutputChars: this.lastTurnOutputChars,
       lastTurnCostUsd: this.lastTurnUsage?.estimatedCostUsd,
       imageCount,
       source: this.source,

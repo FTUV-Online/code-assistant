@@ -984,6 +984,7 @@
   .chat-context .tok.in { color: #79c0ff; }
   .chat-context .tok.out { color: #a5d6a7; }
   .chat-context .tok.cost { color: #d2a8ff; }
+  .chat-context .tok.last { color: #f0b86e; }
   .chat-context .muted { opacity: 0.6; }
   .chat-messages {
     flex: 1; overflow-y: auto;
@@ -4016,27 +4017,82 @@
     customSelect.refresh(sel);
 
     // Context chips
-    if (!info.source) { bar.style.display = 'none'; bar.innerHTML = ''; return; }
     const chips = [];
-    chips.push('<span class="chip' + (info.sourceTruncated ? ' warn' : '') + '">' +
-      escapeHtml(info.source) + (info.sourceTruncated ? ' (truncated)' : '') + '</span>');
+    if (info.source) {
+      chips.push('<span class="chip' + (info.sourceTruncated ? ' warn' : '') + '">' +
+        escapeHtml(info.source) + (info.sourceTruncated ? ' (truncated)' : '') + '</span>');
+    }
     for (const a of (info.attachments || [])) {
       chips.push('<span class="chip">' + escapeHtml(a) + '</span>');
     }
     if (info.imageCount && info.imageCount > 0) {
       chips.push('<span class="chip">🖼 ' + info.imageCount + ' image' + (info.imageCount > 1 ? 's' : '') + '</span>');
     }
+
+    // Treat input and output independently — a provider may report output
+    // but not input (or vice versa). Fall back to char/4 estimate per field.
+    const realIn = typeof info.realInputTokens === 'number' ? info.realInputTokens : null;
+    const realOut = typeof info.realOutputTokens === 'number' ? info.realOutputTokens : null;
+    const hasRealIn = realIn !== null && realIn > 0;
+    const hasRealOut = realOut !== null && realOut > 0;
+    const hasAnyReal = hasRealIn || hasRealOut;
+    const canShowEstimate = !hasAnyReal && info.turns > 0;
+
+    const inTok = hasRealIn ? realIn : (canShowEstimate || hasAnyReal ? info.inputTokens : 0);
+    const outTok = hasRealOut ? realOut : (canShowEstimate || hasAnyReal ? info.outputTokens : 0);
+    const canShowTokens = hasAnyReal || canShowEstimate;
+
+    // Hide the bar entirely only when there's literally nothing to show:
+    // no source / attachments / images, no real token activity, and no turns yet.
+    if (chips.length === 0 && !hasAnyReal && !info.turns) {
+      bar.style.display = 'none';
+      bar.innerHTML = '';
+      return;
+    }
+
     const turnsText = info.turns + ' follow-up' + (info.turns !== 1 ? 's' : '');
     bar.style.display = '';
-    // Prefer real usage from API if available
-    const useReal = typeof info.realInputTokens === 'number';
-    const inTok = useReal ? info.realInputTokens : info.inputTokens;
-    const outTok = useReal ? info.realOutputTokens : info.outputTokens;
-    const inTitle = useReal ? 'Total input tokens billed by provider' : 'Estimated tokens for next request';
-    const outTitle = useReal ? 'Total output tokens billed by provider' : 'Estimated output tokens';
-    let usagePart =
-      ' <span class="muted">·</span> <span class="tok in" title="' + inTitle + '">↑ ' + escapeHtml(formatTokens(inTok)) + ' in</span>' +
-      ' <span class="muted">·</span> <span class="tok out" title="' + outTitle + '">↓ ' + escapeHtml(formatTokens(outTok)) + ' out</span>';
+    let usagePart = '';
+    if (canShowTokens) {
+      const inTitle = hasRealIn
+        ? 'Total session input tokens (provider-reported)'
+        : 'Estimated input tokens (chars / 4)';
+      const outTitle = hasRealOut
+        ? 'Total session output tokens (provider-reported)'
+        : 'Estimated output tokens (chars / 4)';
+      usagePart =
+        ' <span class="muted">·</span> <span class="tok in" title="' + inTitle + '">↑ ' + escapeHtml(formatTokens(inTok)) + ' in</span>' +
+        ' <span class="muted">·</span> <span class="tok out" title="' + outTitle + '">↓ ' + escapeHtml(formatTokens(outTok)) + ' out</span>';
+    }
+
+    // Last-turn token usage — show provider-reported or fall back to chars/4 estimate.
+    const hasLastIn = typeof info.lastTurnInputTokens === 'number' && info.lastTurnInputTokens > 0;
+    const hasLastOut = typeof info.lastTurnOutputTokens === 'number' && info.lastTurnOutputTokens > 0;
+    const lastInEstimate = typeof info.lastTurnInputChars === 'number'
+      ? Math.ceil(info.lastTurnInputChars / 4)
+      : 0;
+    const lastOutEstimate = typeof info.lastTurnOutputChars === 'number'
+      ? Math.ceil(info.lastTurnOutputChars / 4)
+      : 0;
+    const lastIn = hasLastIn ? info.lastTurnInputTokens : lastInEstimate;
+    const lastOut = hasLastOut ? info.lastTurnOutputTokens : lastOutEstimate;
+    const lastInSrc = hasLastIn ? 'provider' : (lastInEstimate > 0 ? 'estimate' : null);
+    const lastOutSrc = hasLastOut ? 'provider' : (lastOutEstimate > 0 ? 'estimate' : null);
+
+    if (lastIn > 0 || lastOut > 0) {
+      const parts = [];
+      if (lastInSrc) parts.push('input ' + formatTokens(lastIn) + ' (' + lastInSrc + ')');
+      if (lastOutSrc) parts.push('output ' + formatTokens(lastOut) + ' (' + lastOutSrc + ')');
+      const lastTitle = 'Last request — ' + parts.join(' · ');
+      let lastText = 'last';
+      if (lastIn > 0) lastText += ' ↑' + escapeHtml(formatTokens(lastIn));
+      if (lastOut > 0) lastText += ' ↓' + escapeHtml(formatTokens(lastOut));
+      usagePart +=
+        ' <span class="muted">·</span> <span class="tok last" title="' + escapeHtml(lastTitle) + '">' +
+        lastText +
+        '</span>';
+    }
+
     if (typeof info.estimatedCostUsd === 'number' && info.estimatedCostUsd > 0) {
       const costStr = formatUsd(info.estimatedCostUsd);
       let costTitle = 'Cumulative estimated cost (USD)';
@@ -4046,10 +4102,17 @@
       if (info.cacheReadInputTokens && info.cacheReadInputTokens > 0) {
         costTitle += '\nCache hits: ' + formatTokens(info.cacheReadInputTokens);
       }
+      if (info.cacheCreationInputTokens && info.cacheCreationInputTokens > 0) {
+        costTitle += '\nCache writes: ' + formatTokens(info.cacheCreationInputTokens);
+      }
       usagePart += ' <span class="muted">·</span> <span class="tok cost" title="' + escapeHtml(costTitle) + '">$' + escapeHtml(costStr) + '</span>';
     }
+
+    const prefix = chips.length > 0
+      ? '<span class="muted">Context:</span> ' + chips.join(' ')
+      : '<span class="muted">Session</span>';
     bar.innerHTML =
-      '<span class="muted">Context:</span> ' + chips.join(' ') +
+      prefix +
       usagePart +
       ' <span class="muted">· ' + escapeHtml(turnsText) + '</span>';
   }
