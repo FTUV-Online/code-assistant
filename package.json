@@ -2,7 +2,7 @@
   "name": "dev-code",
   "displayName": "dev-code",
   "description": "Open-source code completion. Use any provider compatible with Anthropic, OpenAI, Gemini, or Ollama.",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "publisher": "dev-code",
   "license": "MIT",
   "repository": {
@@ -142,7 +142,38 @@
                 "type": "boolean",
                 "default": false,
                 "description": "Enable prompt caching (Anthropic only)."
+              },
+              "contextLimitTokens": {
+                "type": "number",
+                "minimum": 1,
+                "description": "Approximate context window limit for this provider, in tokens. Used for UI context budgeting and auto-compaction planning."
               }
+            }
+          }
+        },
+        "devCode.context": {
+          "type": "object",
+          "default": {
+            "autoCompact": true,
+            "compactThresholdPercent": 80,
+            "reserveOutputTokens": 2048
+          },
+          "description": "Global context budgeting settings for chat sessions.",
+          "properties": {
+            "autoCompact": {
+              "type": "boolean",
+              "description": "Enable automatic context compaction when sessions approach the configured limit."
+            },
+            "compactThresholdPercent": {
+              "type": "number",
+              "minimum": 1,
+              "maximum": 100,
+              "description": "Percentage of the context window at which compaction should begin."
+            },
+            "reserveOutputTokens": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Tokens reserved for the next assistant response so the session leaves headroom before compaction."
             }
           }
         },
@@ -292,9 +323,9 @@
         },
         "devCode.toolUse.maxIterations": {
           "type": "number",
-          "default": 10,
+          "default": 64,
           "minimum": 1,
-          "maximum": 30,
+          "maximum": 255,
           "description": "Maximum tool-use round-trips per chat turn before stopping."
         },
         "devCode.toolUse.allowWriteTools": {

@@ -1529,6 +1529,9 @@
             <label for="f-temperature">Temperature</label>
             <input id="f-temperature" type="number" placeholder="0.2" min="0" max="2" step="0.1">
 
+            <label for="f-contextLimitTokens" title="Approximate context window size for this provider, in tokens. Used for the context meter and auto-compaction.">Context limit (tokens)</label>
+            <input id="f-contextLimitTokens" type="number" placeholder="8192" min="512" step="1">
+
             <label for="f-headers" title="Non-secret HTTP headers as JSON (e.g. api-version, x-region). Do NOT put auth tokens here — use API Key + Auth scheme above.">Custom HTTP headers (JSON)</label>
             <textarea id="f-headers" rows="3" placeholder='{"x-region": "us-east-1"}' spellcheck="false"></textarea>
 
@@ -1536,6 +1539,8 @@
               <input id="f-promptCaching" type="checkbox" checked>
               Prompt caching (Anthropic)
             </label>
+
+            <p class="context-note">Leave blank to use the default estimate for this provider.</p>
           </details>
 
           <div class="form-actions">
@@ -2515,6 +2520,9 @@
     customSelect.refresh($('f-authScheme'));
     updateAuthCustomVisibility();
     $('f-promptCaching').checked = true;
+    $('f-contextLimitTokens').value = '';
+    $('f-contextLimitTokens').placeholder = '8192';
+    $('f-contextLimitTokens').title = 'Approximate context window size for this provider, in tokens.';
     $('f-apiKey').placeholder = 'sk-ant-...';
     $('f-apiKey').type = 'password';
     const tbtn = $('f-apiKeyToggle');
@@ -2538,6 +2546,7 @@
     $('f-apiKey').placeholder = configState.apiKeyStatus[p.id] ? '(key exists — leave blank to keep)' : 'sk-ant-...';
     $('f-maxTokens').value = p.maxTokens != null ? p.maxTokens : '';
     $('f-temperature').value = p.temperature != null ? p.temperature : '';
+    $('f-contextLimitTokens').value = p.contextLimitTokens != null ? p.contextLimitTokens : '';
     $('f-promptCaching').checked = !!p.promptCaching;
     $('f-authScheme').value = p.authScheme || '';
     $('f-authHeaderName').value = p.authHeaderName || '';
@@ -2567,8 +2576,10 @@
     if (dn) config.displayName = dn;
     const mt = $('f-maxTokens').value.trim();
     const tp = $('f-temperature').value.trim();
+    const cl = $('f-contextLimitTokens').value.trim();
     if (mt) config.maxTokens = Number(mt);
     if (tp) config.temperature = Number(tp);
+    if (cl) config.contextLimitTokens = Number(cl);
     if ($('f-promptCaching').checked) config.promptCaching = true;
     const scheme = $('f-authScheme').value;
     if (scheme === 'x-api-key' || scheme === 'bearer') {
@@ -4027,6 +4038,39 @@
     }
     if (info.imageCount && info.imageCount > 0) {
       chips.push('<span class="chip">🖼 ' + info.imageCount + ' image' + (info.imageCount > 1 ? 's' : '') + '</span>');
+    }
+    if (typeof info.providerContextLimitTokens === 'number') {
+      const limit = info.providerContextLimitTokens;
+      const used = typeof info.providerContextUsedTokens === 'number' ? info.providerContextUsedTokens : 0;
+      const remaining = typeof info.providerContextRemainingTokens === 'number'
+        ? info.providerContextRemainingTokens
+        : Math.max(0, limit - used);
+      const pct = typeof info.providerContextUsagePercent === 'number'
+        ? info.providerContextUsagePercent
+        : Math.min(100, Math.round((used / Math.max(1, limit)) * 100));
+      const meterClass = pct >= 95 ? 'danger' : (pct >= 80 ? 'warn' : 'ok');
+      const summaryClass = info.providerContextIsCompacting
+        ? 'compacting'
+        : (info.providerContextSummaryPresent ? 'done' : 'off');
+      const providerClass = meterClass;
+      chips.push(
+        '<span class="chip compact ' + meterClass + '" title="Context window usage">' +
+          '<span class="context-provider ' + providerClass + '">' +
+            escapeHtml(String(used)) + '/' + escapeHtml(String(limit)) + ' tok · ' + escapeHtml(String(pct)) + '%'
+          + '</span>' +
+          '<span class="context-meter ' + meterClass + '" aria-hidden="true">' +
+            '<span class="bar"><span class="fill" style="width:' + escapeHtml(String(pct)) + '%"></span></span>' +
+          '</span>' +
+        '</span>'
+      );
+      if (info.providerContextIsCompacting) {
+        chips.push('<span class="chip warn compact"><span class="context-summary compacting">Compacting…</span></span>');
+      } else if (info.providerContextShouldCompactSoon) {
+        chips.push('<span class="chip warn compact"><span class="context-summary">Near limit · compact soon</span></span>');
+      }
+      if (info.providerContextLastCompactionAt) {
+        chips.push('<span class="chip compact ' + summaryClass + '">Last compacted</span>');
+      }
     }
 
     // Treat input and output independently — a provider may report output
