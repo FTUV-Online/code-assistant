@@ -5,8 +5,119 @@ import type { ProviderConfig } from '../providers/base';
 
 const NS = 'devCode';
 
+export type ProviderContextSettings = {
+  contextLimitTokens?: number;
+};
+
+export type ContextBudgetSettings = {
+  autoCompact: boolean;
+  compactThresholdPercent: number;
+  reserveOutputTokens: number;
+};
+
+const DEFAULT_CONTEXT_BUDGET_SETTINGS: ContextBudgetSettings = {
+  autoCompact: true,
+  compactThresholdPercent: 80,
+  reserveOutputTokens: 2048,
+};
+
 export function getProviderConfigs(): ProviderConfig[] {
   return vscode.workspace.getConfiguration(NS).get<ProviderConfig[]>('providers') ?? [];
+}
+
+function normalizePositiveInt(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined;
+  const n = Math.floor(value);
+  return n > 0 ? n : undefined;
+}
+
+export function getProviderContextLimit(providerId: string): number | undefined {
+  const cfg = getProviderConfigs().find((p) => p.id === providerId) as
+    | (ProviderConfig & ProviderContextSettings)
+    | undefined;
+  const limit = normalizePositiveInt(cfg?.contextLimitTokens);
+  if (limit === undefined) return undefined;
+  return Math.max(512, limit);
+}
+
+export function hasValidProviderContextLimit(providerId: string): boolean {
+  return getProviderContextLimit(providerId) !== undefined;
+}
+
+export function validateProviderContextLimit(value: unknown): number | undefined {
+  const limit = normalizePositiveInt(value);
+  return limit !== undefined ? Math.max(512, limit) : undefined;
+}
+
+export function validateContextBudgetPercent(value: unknown): number | undefined {
+  const n = normalizePositiveInt(value);
+  if (n === undefined) return undefined;
+  return Math.min(100, Math.max(1, n));
+}
+
+function sanitizeContextBudgetSettings(raw: Partial<ContextBudgetSettings>): ContextBudgetSettings {
+  const compactThresholdPercent =
+    validateContextBudgetPercent(raw.compactThresholdPercent) ??
+    DEFAULT_CONTEXT_BUDGET_SETTINGS.compactThresholdPercent;
+  const reserveOutputTokens =
+    validateReserveOutputTokens(raw.reserveOutputTokens) ??
+    DEFAULT_CONTEXT_BUDGET_SETTINGS.reserveOutputTokens;
+  return {
+    autoCompact: typeof raw.autoCompact === 'boolean' ? raw.autoCompact : DEFAULT_CONTEXT_BUDGET_SETTINGS.autoCompact,
+    compactThresholdPercent,
+    reserveOutputTokens,
+  };
+}
+
+export function getSanitizedContextBudgetSettings(raw: unknown): ContextBudgetSettings {
+  if (!isValidContextBudgetSettings(raw)) return DEFAULT_CONTEXT_BUDGET_SETTINGS;
+  return sanitizeContextBudgetSettings(raw);
+}
+
+export function getDefaultContextBudgetSettings(): ContextBudgetSettings {
+  return { ...DEFAULT_CONTEXT_BUDGET_SETTINGS };
+}
+
+export function validateReserveOutputTokens(value: unknown): number | undefined {
+  return normalizePositiveInt(value);
+}
+
+export function isValidContextBudgetSettings(value: unknown): value is Partial<ContextBudgetSettings> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+export function getContextBudgetSettings(): ContextBudgetSettings {
+  const raw = vscode.workspace.getConfiguration(NS).get<Partial<ContextBudgetSettings>>('context') ?? {};
+  return {
+    autoCompact: typeof raw.autoCompact === 'boolean' ? raw.autoCompact : DEFAULT_CONTEXT_BUDGET_SETTINGS.autoCompact,
+    compactThresholdPercent: (() => {
+      const n = normalizePositiveInt(raw.compactThresholdPercent);
+      if (!n) return DEFAULT_CONTEXT_BUDGET_SETTINGS.compactThresholdPercent;
+      return Math.min(100, Math.max(1, n));
+    })(),
+    reserveOutputTokens: (() => {
+      const n = normalizePositiveInt(raw.reserveOutputTokens);
+      return n ?? DEFAULT_CONTEXT_BUDGET_SETTINGS.reserveOutputTokens;
+    })(),
+  };
+}
+
+export function getProviderContextSettings(providerId: string): ProviderContextSettings {
+  return {
+    contextLimitTokens: getProviderContextLimit(providerId),
+  };
+}
+
+export function isAutoCompactEnabled(): boolean {
+  return getContextBudgetSettings().autoCompact;
+}
+
+export function getContextCompactThresholdPercent(): number {
+  return getContextBudgetSettings().compactThresholdPercent;
+}
+
+export function getContextReserveOutputTokens(): number {
+  return getContextBudgetSettings().reserveOutputTokens;
 }
 
 export function getActiveProviderId(): string {

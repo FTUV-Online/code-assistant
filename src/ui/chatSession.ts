@@ -1,14 +1,18 @@
 import * as vscode from 'vscode';
 import {
   getActiveProviderId,
+  getContextCompactThresholdPercent,
+  getContextReserveOutputTokens,
   getEditFileAutoRetry,
   getFeatureProviderId,
   getIncludeFullFile,
   getOutputLanguage,
   getProviderConfigs,
+  getProviderContextLimit,
   getToolUseBlacklist,
   getToolUseEnabled,
   getToolUseMaxIterations,
+  isAutoCompactEnabled,
   type FeatureName,
 } from '../config/settings';
 import type {
@@ -88,6 +92,8 @@ export type HistoryEntry = {
   selectedProviderId: string;
   createdAt: number;
   updatedAt: number;
+  compactSummary?: string;
+  compactAt?: number;
 };
 
 export type HistorySummary = {
@@ -165,6 +171,23 @@ const CODE_REWRITE_PROMPT =
   '<one fenced code block containing the COMPLETE final code — not a diff>\n\n' +
   'You will continue chatting; the user may ask follow-up questions about your rewrite.';
 
+const COMPACT_SUMMARY_PROMPT =
+  'You are summarizing a coding-assistant conversation to save context space. ' +
+  'Review the conversation below and produce a structured summary. Be concise but complete.\n\n' +
+  '## Active Tasks\n' +
+  '- Tasks the user asked for that are NOT yet completed (if any)\n\n' +
+  '## Key Decisions\n' +
+  '- Important decisions, design choices, or agreed approaches\n\n' +
+  '## Files Referenced\n' +
+  '- Files that were read, edited, discussed, or modified (with brief context)\n\n' +
+  '## User Preferences & Constraints\n' +
+  '- User preferences, conventions, constraints, or corrections mentioned\n\n' +
+  '## Open Questions\n' +
+  '- Questions still unresolved (if any)\n\n' +
+  '## Summary\n' +
+  '- 3-5 sentence summary of the conversation flow and outcomes\n\n' +
+  'IMPORTANT: output ONLY the structured summary above. Do not add greetings or commentary.';
+
 const MAX_DIFF_CHARS = 30000;
 const MAX_CODE_CHARS = 30000;
 const MAX_ATTACHMENT_CHARS = 100_000;
@@ -190,6 +213,17 @@ export type ChatContextInfo = {
   sourceTruncated: boolean;
   attachments: string[];
   selectedProviderId: string;
+  providerContextLimitTokens?: number;
+  providerContextUsedTokens: number;
+  providerContextRemainingTokens?: number;
+  providerContextUsagePercent?: number;
+  providerContextNearLimit: boolean;
+  providerContextIsEstimated: boolean;
+  providerContextIsCompacting: boolean;
+  providerContextLastCompactionAt?: number;
+  providerContextCompactThresholdPercent?: number;
+  providerContextShouldCompactSoon: boolean;
+  providerContextSummaryPresent: boolean;
   availableProviders: Array<{
     id: string;
     displayName?: string;
@@ -280,6 +314,9 @@ export class ChatSession {
   // so the delta for last-turn estimates includes the user message.
   private pendingTurnInputChars: number | null = null;
   private pendingTurnOutputChars: number | null = null;
+  private isCompacting = false;
+  private lastCompactionAt: number | null = null;
+  private compactSummary = '';
 
   constructor(
     id: string,
@@ -437,6 +474,9 @@ export class ChatSession {
     this.attachments = [...entry.attachments];
     this.messages = entry.messages.map((m) => ({ ...m }));
     if (entry.selectedProviderId) this.selectedProviderId = entry.selectedProviderId;
+    this.compactSummary = entry.compactSummary ?? '';
+    this.lastCompactionAt = entry.compactAt ?? null;
+    this.isCompacting = false;
 
     this.post({
       type: 'init',
@@ -477,6 +517,8 @@ export class ChatSession {
       selectedProviderId: this.selectedProviderId,
       createdAt: this.createdAt,
       updatedAt: Date.now(),
+      compactSummary: this.compactSummary || undefined,
+      compactAt: this.lastCompactionAt ?? undefined,
     };
   }
 
@@ -823,12 +865,15 @@ export class ChatSession {
 
   private async streamReply(): Promise<void> {
     this.cancelStream();
+    const providerId = this.selectedProviderId || getActiveProviderId();
+    const provider = providerId ? await getProviderById(this.context, providerId) : null;
+    if (await this.maybeCompactConversation(provider ?? undefined)) {
+      this.postContext();
+    }
     const ctrl = new AbortController();
     this.currentAbort = ctrl;
 
     try {
-      const providerId = this.selectedProviderId || getActiveProviderId();
-      const provider = providerId ? await getProviderById(this.context, providerId) : null;
       if (!provider) {
         throw new Error(
           'No provider selected. Pick one from the dropdown or configure one in the Config tab.',
@@ -1109,6 +1154,11 @@ export class ChatSession {
     for (let iter = 0; iter < maxIters; iter++) {
       if (ctrl.signal.aborted) break;
 
+      // Compact between tool iterations if the last tool result pushed us near the limit.
+      if (iter > 0 && (await this.maybeCompactConversation())) {
+        this.postContext();
+      }
+
       this.post({ type: 'startAssistant', sessionId: this.id });
 
       const messages: ChatMessage[] = [
@@ -1292,12 +1342,30 @@ export class ChatSession {
     }
     const imageTokens = imageCount * 1500;
     const configs = getProviderConfigs();
+    const providerContextLimitTokens =
+      getProviderContextLimit(this.selectedProviderId) ?? undefined;
+    const providerContextUsedTokens =
+      Math.max(
+        this.cumulativeUsage.inputTokens,
+        Math.ceil(inputChars / 4) + imageTokens,
+      ) + Math.max(0, this.cumulativeUsage.outputTokens);
+    const providerContextRemainingTokens =
+      typeof providerContextLimitTokens === 'number'
+        ? Math.max(0, providerContextLimitTokens - providerContextUsedTokens)
+        : undefined;
+    const providerContextUsagePercent =
+      typeof providerContextLimitTokens === 'number' && providerContextLimitTokens > 0
+        ? Math.min(100, Math.round((providerContextUsedTokens / providerContextLimitTokens) * 100))
+        : undefined;
     // Only expose provider-reported values when they are > 0.
     // Many proxies / local models report output but not input (or 0 for input).
     // By leaving undefined when 0, the webview falls back to its char/4 estimate
     // for that specific field — avoiding "0 tok in" when the provider didn't report.
     const hasRealInput = this.cumulativeUsage.inputTokens > 0;
     const hasRealOutput = this.cumulativeUsage.outputTokens > 0;
+      const thresholdPercent = getContextCompactThresholdPercent();
+      const providerContextNearLimit =
+        typeof providerContextUsagePercent === 'number' ? providerContextUsagePercent >= thresholdPercent : false;
     return {
       turns,
       inputChars,
@@ -1331,6 +1399,20 @@ export class ChatSession {
       sourceTruncated: this.sourceTruncated,
       attachments: [...this.attachments],
       selectedProviderId: this.selectedProviderId,
+      providerContextLimitTokens,
+      providerContextUsedTokens,
+      providerContextRemainingTokens,
+      providerContextUsagePercent,
+      providerContextNearLimit,
+      providerContextIsEstimated: providerContextLimitTokens === undefined,
+      providerContextIsCompacting: this.isCompacting,
+      providerContextLastCompactionAt: this.lastCompactionAt ?? undefined,
+      providerContextCompactThresholdPercent: thresholdPercent,
+      providerContextShouldCompactSoon:
+        typeof providerContextUsagePercent === 'number'
+          ? providerContextUsagePercent >= thresholdPercent
+          : false,
+      providerContextSummaryPresent: this.compactSummary.trim().length > 0,
       availableProviders: configs.map((c: ProviderConfig) => ({
         id: c.id,
         displayName: c.displayName,
@@ -1338,6 +1420,244 @@ export class ChatSession {
         protocol: c.protocol,
       })),
     };
+  }
+
+  private async maybeCompactConversation(
+    provider?: LLMProvider,
+  ): Promise<boolean> {
+    if (this.isCompacting) return false;
+    const providerLimit = getProviderContextLimit(this.selectedProviderId);
+    if (!providerLimit || !isAutoCompactEnabled()) return false;
+    const estimate = this.getContextInfo();
+    const usagePercent = estimate.providerContextUsagePercent ?? 0;
+    if (usagePercent < getContextCompactThresholdPercent()) return false;
+    const reserveTokens = getContextReserveOutputTokens();
+    if (
+      estimate.providerContextRemainingTokens !== undefined &&
+      estimate.providerContextRemainingTokens > reserveTokens
+    ) {
+      return false;
+    }
+
+    this.isCompacting = true;
+    try {
+      const maxRetainedTokens = Math.max(512, Math.floor(providerLimit * 0.35));
+      const targetRetainedTokens = Math.max(256, Math.floor(providerLimit * 0.25));
+      const result = await this.compactMessagesByTokenBudget(
+        maxRetainedTokens,
+        targetRetainedTokens,
+        provider,
+      );
+      if (!result.compacted) return false;
+
+      this.compactSummary = result.summary;
+      this.lastCompactionAt = Date.now();
+      log.info('chat compacted', {
+        sessionId: this.id,
+        provider: this.selectedProviderId,
+        droppedMessages: result.droppedCount,
+        keptMessages: result.keptCount,
+        estimatedTokensBefore: result.beforeTokens,
+        estimatedTokensAfter: result.afterTokens,
+        aiSummary: result.aiSummary ?? false,
+      });
+      this.postContext();
+      return true;
+    } finally {
+      this.isCompacting = false;
+    }
+  }
+
+  private async compactMessagesByTokenBudget(
+    maxRetainedTokens: number,
+    targetRetainedTokens: number,
+    provider?: LLMProvider,
+  ): Promise<{
+    compacted: boolean;
+    summary: string;
+    droppedCount: number;
+    keptCount: number;
+    beforeTokens: number;
+    afterTokens: number;
+    aiSummary?: boolean;
+  }> {
+    const beforeTokens = this.estimateMessagesTokens(this.messages);
+    if (this.messages.length <= 2 || beforeTokens <= maxRetainedTokens) {
+      return {
+        compacted: false,
+        summary: this.compactSummary,
+        droppedCount: 0,
+        keptCount: this.messages.length,
+        beforeTokens,
+        afterTokens: beforeTokens,
+      };
+    }
+
+    const safeCutPoints = this.computeSafeCutPoints();
+    if (safeCutPoints.length === 0) {
+      return {
+        compacted: false,
+        summary: this.compactSummary,
+        droppedCount: 0,
+        keptCount: this.messages.length,
+        beforeTokens,
+        afterTokens: beforeTokens,
+      };
+    }
+
+    let chosenCut = safeCutPoints[0];
+    for (const cut of safeCutPoints) {
+      const retained = this.messages.slice(cut);
+      const retainedTokens = this.estimateMessagesTokens(retained);
+      if (retainedTokens <= targetRetainedTokens) {
+        chosenCut = cut;
+        break;
+      }
+      if (retainedTokens <= maxRetainedTokens) {
+        chosenCut = cut;
+      }
+    }
+
+    const dropped = this.messages.slice(0, chosenCut);
+    const kept = this.messages.slice(chosenCut);
+    if (dropped.length === 0 || kept.length === 0) {
+      return {
+        compacted: false,
+        summary: this.compactSummary,
+        droppedCount: 0,
+        keptCount: this.messages.length,
+        beforeTokens,
+        afterTokens: beforeTokens,
+      };
+    }
+
+    // Try AI-powered summary first, fall back to manual extraction.
+    let summary: string;
+    let aiSummary = false;
+    if (provider && typeof provider.chat === "function") {
+      try {
+        summary = await this.buildAISummary(dropped, provider);
+        aiSummary = true;
+      } catch {
+        summary = this.buildCompactionSummary(dropped);
+      }
+    } else {
+      summary = this.buildCompactionSummary(dropped);
+    }
+    const summaryMessage: ChatMessage = {
+      role: 'user',
+      content: `Context summary so far:\n\n${summary || '(no summary available)'}`,
+    };
+    this.messages = [summaryMessage, ...kept];
+    const afterTokens = this.estimateMessagesTokens(this.messages);
+    return {
+      compacted: true,
+      summary,
+      droppedCount: dropped.length,
+      keptCount: kept.length + 1,
+      beforeTokens,
+      afterTokens,
+      aiSummary,
+    };
+  }
+
+  private computeSafeCutPoints(): number[] {
+    const points = new Set<number>();
+    for (let i = 1; i < this.messages.length; i++) {
+      const prev = this.messages[i - 1];
+      const curr = this.messages[i];
+      if (prev.role === 'user' && curr.role === 'assistant') points.add(i - 1);
+      if (prev.role === 'assistant' && curr.role === 'user') points.add(i);
+    }
+    points.add(0);
+    points.delete(this.messages.length);
+    return [...points]
+      .filter((n) => n >= 0 && n < this.messages.length)
+      .sort((a, b) => a - b);
+  }
+
+  private estimateMessagesTokens(messages: ChatMessage[]): number {
+    return messages.reduce((sum, msg) => sum + this.estimateMessageTokens(msg), 0);
+  }
+
+  private estimateMessageTokens(msg: ChatMessage): number {
+    if (typeof msg.content === 'string') {
+      return Math.max(1, Math.ceil(msg.content.length / 4));
+    }
+    let total = 0;
+    for (const b of msg.content) {
+      if (b.type === 'text') {
+        total += Math.ceil(b.text.length / 4);
+      } else if (b.type === 'tool_result') {
+        total += Math.ceil(b.content.length / 4);
+      } else if (b.type === 'tool_use') {
+        total += Math.ceil(JSON.stringify(b.input ?? {}).length / 4);
+      } else if (b.type === 'image') {
+        total += 1500;
+      }
+    }
+    return Math.max(1, total);
+  }
+
+  private buildCompactionSummary(droppedMessages: ChatMessage[]): string {
+    const parts: string[] = [];
+    for (const msg of droppedMessages) {
+      const text = extractTextContent(msg.content).trim();
+      if (!text) continue;
+      const label = msg.role === 'assistant' ? 'Assistant' : 'User';
+      parts.push(`${label}: ${text.slice(0, 400)}`);
+    }
+    return parts.join('\n\n');
+  }
+
+  /**
+   * Ask the LLM to produce a structured summary of the dropped messages.
+   * Falls back to manual extraction on any failure.
+   */
+  private async buildAISummary(
+    droppedMessages: ChatMessage[],
+    provider: LLMProvider,
+  ): Promise<string> {
+    // Build a readable transcript from the dropped messages.
+    const transcriptParts: string[] = [];
+    for (const msg of droppedMessages) {
+      const text = extractTextContent(msg.content).trim();
+      if (!text) continue;
+      const label = msg.role === 'assistant' ? 'Assistant' : 'User';
+      // Keep more context for the AI to summarize well (2000 chars per message).
+      transcriptParts.push(`### ${label}\n${text.slice(0, 2000)}`);
+    }
+    const transcript = transcriptParts.join('\n\n');
+    if (!transcript.trim()) return this.buildCompactionSummary(droppedMessages);
+
+    const compactionMessages: ChatMessage[] = [
+      { role: 'system', content: COMPACT_SUMMARY_PROMPT },
+      { role: 'user', content: `Conversation to summarize:\n\n${transcript}` },
+    ];
+
+    try {
+      const ctrl = new AbortController();
+      // 10-second timeout for the summary call.
+      const timeout = setTimeout(() => ctrl.abort(), 10_000);
+      let summary = '';
+      try {
+        for await (const chunk of provider.chat(
+          compactionMessages,
+          { maxTokens: 1500, temperature: 0.3 },
+          ctrl.signal,
+        )) {
+          summary += chunk;
+        }
+      } finally {
+        clearTimeout(timeout);
+      }
+      const cleaned = summary.trim();
+      if (cleaned.length > 0) return cleaned;
+    } catch {
+      log.warn('ai compaction summary failed, falling back to manual');
+    }
+    // Fallback to manual summary.
+    return this.buildCompactionSummary(droppedMessages);
   }
 
   private post(msg: ChatOutbound): void {
