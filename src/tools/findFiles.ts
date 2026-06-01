@@ -8,6 +8,7 @@ const HARD_MAX = 500;
 type Input = { glob?: string; max?: number };
 
 export const findFilesTool: Tool = {
+  readonly: true,
   def: {
     name: 'find_files',
     description:

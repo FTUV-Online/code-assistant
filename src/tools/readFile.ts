@@ -3,6 +3,7 @@ import { isBinary, matchesAnyGlob, resolveSafePath, truncate } from './common';
 import type { Tool } from './types';
 
 const MAX_CHARS = 12000;
+const MAX_LINES = 500;
 
 type Input = {
   path?: string;
@@ -11,11 +12,13 @@ type Input = {
 };
 
 export const readFileTool: Tool = {
+  readonly: true,
   def: {
     name: 'read_file',
     description:
       'Read a workspace file. Returns its content with 1-based line numbers prefixed. ' +
-      'Use startLine/endLine to read a slice of large files.',
+      `Use startLine/endLine to read a slice of large files. At most ${MAX_LINES} lines are ` +
+      'returned per call; if the range is larger, the result says where to resume.',
     input_schema: {
       type: 'object',
       properties: {
@@ -59,18 +62,26 @@ export const readFileTool: Tool = {
     const text = new TextDecoder().decode(bytes);
     const lines = text.split('\n');
     const from = Math.max(1, startLine ?? 1);
-    const to = Math.min(lines.length, endLine ?? lines.length);
-    if (from > to) {
-      return { content: `Error: empty range (${from}..${to}) for ${lines.length}-line file.`, isError: true };
+    const requestedTo = Math.min(lines.length, endLine ?? lines.length);
+    if (from > requestedTo) {
+      return { content: `Error: empty range (${from}..${requestedTo}) for ${lines.length}-line file.`, isError: true };
     }
+    // Cap the number of lines returned so a giant file can't blow the context.
+    // The model can page through the rest via startLine/endLine.
+    const to = Math.min(requestedTo, from + MAX_LINES - 1);
+    const lineCapped = to < requestedTo;
     const slice = lines.slice(from - 1, to);
     const width = String(to).length;
     const numbered = slice
       .map((line, i) => `${String(from + i).padStart(width)}  ${line}`)
       .join('\n');
+    const header = `${relPath} (lines ${from}-${to} of ${lines.length}):\n`;
+    let footer = '';
+    if (lineCapped) {
+      footer = `\n... [${requestedTo - to} more lines; re-read with startLine=${to + 1} to continue]`;
+    }
     return {
-      content:
-        `${relPath} (lines ${from}-${to} of ${lines.length}):\n` + truncate(numbered, MAX_CHARS),
+      content: header + truncate(numbered, MAX_CHARS) + footer,
     };
   },
 };

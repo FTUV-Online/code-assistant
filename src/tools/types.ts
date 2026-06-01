@@ -33,6 +33,8 @@ export type Tool = {
   def: ToolDef;
   execute: ToolExecutor;
   destructive?: boolean;
+  /** When true, the tool only reads state and can safely run in parallel with other readonly tools. */
+  readonly?: boolean;
   /** Which user-controlled flag gates this tool's presence in the AI's tool list. */
   gateFlag?: 'allowWriteTools' | 'allowShell';
 };

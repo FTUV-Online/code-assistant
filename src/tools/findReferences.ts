@@ -15,6 +15,7 @@ type Input = {
 };
 
 export const findReferencesTool: Tool = {
+  readonly: true,
   def: {
     name: 'find_references',
     description:

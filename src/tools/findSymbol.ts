@@ -45,6 +45,7 @@ function kindName(kind: vscode.SymbolKind): string {
 }
 
 export const findSymbolTool: Tool = {
+  readonly: true,
   def: {
     name: 'find_symbol',
     description:

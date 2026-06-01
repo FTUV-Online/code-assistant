@@ -5,6 +5,7 @@ import type { Tool } from './types';
 const MAX_CHARS = 8000;
 
 export const getSelectionTool: Tool = {
+  readonly: true,
   def: {
     name: 'get_selection',
     description:

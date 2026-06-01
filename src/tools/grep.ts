@@ -15,6 +15,7 @@ type Input = {
 };
 
 export const grepTool: Tool = {
+  readonly: true,
   def: {
     name: 'grep',
     description:

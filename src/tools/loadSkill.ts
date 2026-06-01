@@ -4,6 +4,7 @@ import type { Tool } from './types';
 type Input = { name?: string };
 
 export const loadSkillTool: Tool = {
+  readonly: true,
   def: {
     name: 'load_skill',
     description:

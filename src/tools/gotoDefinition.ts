@@ -37,6 +37,7 @@ async function readSnippet(uri: vscode.Uri, range: vscode.Range): Promise<string
 }
 
 export const gotoDefinitionTool: Tool = {
+  readonly: true,
   def: {
     name: 'goto_definition',
     description:

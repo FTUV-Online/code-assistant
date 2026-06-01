@@ -17,6 +17,8 @@ import { grepTool } from './grep';
 import { listDirTool } from './listDir';
 import { listMemoryTool } from './listMemory';
 import { loadSkillTool } from './loadSkill';
+import { multiEditTool } from './multiEdit';
+import { normalizeToolArgs } from './parseArgs';
 import { readFileTool } from './readFile';
 import { readMemoryTool } from './readMemory';
 import { runCommandTool } from './runCommand';
@@ -38,6 +40,7 @@ const TOOLS: Record<string, Tool> = {
   delegate_research: delegateResearchTool,
   write_file: writeFileTool,
   edit_file: editFileTool,
+  multi_edit: multiEditTool,
   load_skill: loadSkillTool,
   run_command: runCommandTool,
   read_memory: readMemoryTool,
@@ -105,6 +108,11 @@ export function getToolDef(name: string): ToolDef | null {
   return TOOLS[name]?.def ?? null;
 }
 
+/** Whether a tool only reads workspace state (safe to run in parallel with other readonly tools). MCP tools are conservatively treated as non-readonly. */
+export function isToolReadonly(name: string): boolean {
+  return TOOLS[name]?.readonly === true;
+}
+
 export async function executeTool(
   name: string,
   input: unknown,
@@ -134,9 +142,10 @@ export async function executeTool(
   if (!tool) {
     return { content: `Error: unknown tool "${name}".`, isError: true };
   }
+  const normalizedInput = normalizeToolArgs(input, tool.def);
   const t0 = Date.now();
   try {
-    const result = await tool.execute(input, ctx);
+    const result = await tool.execute(normalizedInput, ctx);
     log.info('tool exec', {
       name,
       ms: Date.now() - t0,

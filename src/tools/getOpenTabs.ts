@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import type { Tool } from './types';
 
 export const getOpenTabsTool: Tool = {
+  readonly: true,
   def: {
     name: 'get_open_tabs',
     description:

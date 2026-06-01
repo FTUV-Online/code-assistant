@@ -2,6 +2,7 @@ import { listMemories } from '../memory/manager';
 import type { Tool } from './types';
 
 export const listMemoryTool: Tool = {
+  readonly: true,
   def: {
     name: 'list_memory',
     description:

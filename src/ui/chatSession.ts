@@ -6,7 +6,6 @@ import {
   getEditFileAutoRetry,
   getFeatureProviderId,
   getIncludeFullFile,
-  getOutputLanguage,
   getProviderConfigs,
   getProviderContextLimit,
   getToolUseBlacklist,
@@ -18,7 +17,6 @@ import {
 import type {
   ChatContentBlock,
   ChatMessage,
-  ImageBlock,
   ImageMediaType,
   LLMProvider,
   ProviderConfig,
@@ -27,21 +25,65 @@ import type {
 } from '../providers/base';
 import { getProviderById } from '../providers/manager';
 import { estimateCostUsd } from '../providers/pricing';
-import { buildMemoryPromptSection } from '../memory/manager';
 import { isBinary, matchesAnyGlob, resolveSafePath } from '../tools/common';
 import { isRetryableEditMatchError } from '../tools/editLogic';
 import {
   executeTool,
   getAllToolDefs,
-  getSkillManager,
-  getSubAgentToolDefs,
   getWorkspaceRoot,
+  isToolReadonly,
 } from '../tools/registry';
 import type { ToolExecutionContext } from '../tools/types';
 import * as log from '../util/logger';
+import {
+  buildCompactionSummary,
+  computeMessageChars,
+  computeSafeCutPoints,
+  dataUrlToImageBlock,
+  deriveTitleFromMessage,
+  estimateMessagesTokens,
+  extractTextContent,
+  looksLikeIntentWithoutAction,
+  stripImagesFromMessages,
+  withAbort,
+} from './chat/helpers';
+import {
+  ensureMemoryPromptLoaded,
+  memorySectionAffix,
+  refreshMemoryPrompt as refreshMemoryPromptImpl,
+} from './chat/memoryPrompt';
+import {
+  AUTO_CONTINUE_NUDGE,
+  CHAT_SYSTEM_PROMPT,
+  CODE_EXPLAIN_PROMPT,
+  CODE_REVIEW_PROMPT,
+  CODE_REWRITE_PROMPT,
+  COMPACT_SUMMARY_PROMPT,
+  DIFF_EXPLAIN_PROMPT,
+  DIFF_REVIEW_PROMPT,
+  langInstruction,
+  skillsInstruction,
+} from './chat/prompts';
+import { runSubAgent as runSubAgentImpl } from './chat/subAgent';
+import type {
+  ChatContextInfo as ChatContextInfoImported,
+  ChatOutbound as ChatOutboundImported,
+  CodeAnalysisKind as CodeAnalysisKindImported,
+  HistoryEntry as HistoryEntryImported,
+  HistorySummary as HistorySummaryImported,
+  ImagePayload as ImagePayloadImported,
+  SessionKind as SessionKindImported,
+} from './chat/types';
 
-export type SessionKind = 'explain' | 'review' | 'rewrite' | 'chat';
-export type CodeAnalysisKind = 'explain' | 'review' | 'rewrite';
+export type SessionKind = SessionKindImported;
+export type CodeAnalysisKind = CodeAnalysisKindImported;
+export type HistoryEntry = HistoryEntryImported;
+export type HistorySummary = HistorySummaryImported;
+export type ChatContextInfo = ChatContextInfoImported;
+export type ImagePayload = ImagePayloadImported;
+export type ChatOutbound = ChatOutboundImported;
+
+export const refreshMemoryPrompt = refreshMemoryPromptImpl;
 
 const MAX_RETRY_FILE_CHARS = 20_000;
 
@@ -79,198 +121,9 @@ function buildEditRetryMessage(relPath: string, content: string): string {
   );
 }
 
-export type HistoryEntry = {
-  id: string;
-  title: string;
-  kind: SessionKind;
-  fileLabel: string;
-  filePath: string;
-  source: string;
-  systemPrompt: string;
-  messages: ChatMessage[];
-  attachments: string[];
-  selectedProviderId: string;
-  createdAt: number;
-  updatedAt: number;
-  compactSummary?: string;
-  compactAt?: number;
-};
-
-export type HistorySummary = {
-  id: string;
-  title: string;
-  kind: SessionKind;
-  fileLabel: string;
-  messageCount: number;
-  updatedAt: number;
-};
-
-const DIFF_EXPLAIN_PROMPT =
-  'You explain a git diff to a developer reviewing their own change. ' +
-  'Be concise and structured:\n' +
-  '1) "What changed" — 1-3 bullet points summarising the modifications.\n' +
-  '2) "Why it likely matters" — short reasoning about intent, risk, or follow-ups.\n' +
-  'Use markdown. Do not restate the entire diff; focus on the meaningful parts.\n' +
-  'You will continue chatting with the developer afterwards; remember the diff for follow-up questions.';
-
-const DIFF_REVIEW_PROMPT =
-  'You are a senior engineer doing a careful code review on a git diff. ' +
-  'Identify only real issues. Group findings under headings:\n' +
-  '- **Blockers** — bugs, security holes, data corruption risks.\n' +
-  '- **Suggestions** — design or correctness improvements.\n' +
-  '- **Nits** — naming, style, small readability.\n' +
-  'Quote the specific lines (using backticks) when calling something out. ' +
-  'If there is nothing concerning, write exactly: "LGTM — no concerns." and stop.\n' +
-  'You will continue chatting with the developer afterwards; remember the diff for follow-up questions.';
-
-const CODE_EXPLAIN_PROMPT =
-  'You explain a code snippet to a developer. Be concise and structured:\n' +
-  '- "What it does" — 2-4 sentences summary.\n' +
-  '- "How it works" — bullet points on the key logic, control flow, side effects, error handling.\n' +
-  '- "Notes" — any unusual patterns, gotchas, or potential issues worth highlighting.\n' +
-  'Use markdown. Reference identifiers with backticks. Avoid restating the code verbatim.\n' +
-  'You will continue chatting; remember the snippet for follow-up questions.';
-
-const CODE_REVIEW_PROMPT =
-  'You are a senior engineer reviewing a code snippet. Identify only real issues. ' +
-  'Group findings under:\n' +
-  '- **Blockers** — bugs, security holes, data corruption risks.\n' +
-  '- **Suggestions** — design or correctness improvements.\n' +
-  '- **Nits** — naming, style, small readability.\n' +
-  'Quote specific lines (using backticks) when calling something out. ' +
-  'If there is nothing concerning, write exactly: "LGTM — no concerns." and stop.\n' +
-  'You will continue chatting; remember the snippet for follow-up questions.';
-
-const CHAT_SYSTEM_PROMPT =
-  'You are a coding assistant inside a VS Code extension. The user can ask any coding ' +
-  'or workspace-related question. They may attach files (via the + button) or images. ' +
-  'You have workspace tools available (read_file, grep, list_dir, find_files, git_log, ' +
-  'get_open_tabs, get_selection, find_symbol, goto_definition, find_references, delegate_research) ' +
-  'and memory tools (read_memory, write_memory, list_memory) for persistent notes across sessions. ' +
-  'Prefer find_symbol over grep when looking up a definition by name, and goto_definition / ' +
-  'find_references for semantic navigation (they use VS Code language servers). ' +
-  'Use these tools whenever the user references workspace state ("this file", "where is X used", etc.). ' +
-  'When you learn something durable (user preferences, project conventions, corrections), save it ' +
-  'via write_memory so it survives this session. Format responses with markdown. Be concise and direct.\n\n' +
-  'CRITICAL: never end your turn after announcing an action without performing it. If your text ' +
-  'ends with a colon, ellipsis, arrow ("→"), or any phrase that promises a next step, you MUST ' +
-  'call the corresponding tool in the same turn. Either complete the work in this turn or finish ' +
-  'with a self-contained final answer — never with an unfinished promise.';
-
-const CODE_REWRITE_PROMPT =
-  'You are an expert engineer rewriting a code snippet to optimize it while ' +
-  'preserving correctness. Rules:\n' +
-  '- Keep public behavior IDENTICAL (same inputs → same outputs and side effects).\n' +
-  '- Improve clarity, performance, idiomaticity for the snippet language.\n' +
-  '- Do NOT change function signatures unless required by the language idiom.\n' +
-  '- Do NOT introduce dependencies that are not already in the snippet.\n' +
-  'Output exactly in this structure:\n' +
-  '## Changes\n' +
-  '<short bullet list of what changed and why>\n\n' +
-  '## Rewritten code\n' +
-  '<one fenced code block containing the COMPLETE final code — not a diff>\n\n' +
-  'You will continue chatting; the user may ask follow-up questions about your rewrite.';
-
-const COMPACT_SUMMARY_PROMPT =
-  'You are summarizing a coding-assistant conversation to save context space. ' +
-  'Review the conversation below and produce a structured summary. Be concise but complete.\n\n' +
-  '## Active Tasks\n' +
-  '- Tasks the user asked for that are NOT yet completed (if any)\n\n' +
-  '## Key Decisions\n' +
-  '- Important decisions, design choices, or agreed approaches\n\n' +
-  '## Files Referenced\n' +
-  '- Files that were read, edited, discussed, or modified (with brief context)\n\n' +
-  '## User Preferences & Constraints\n' +
-  '- User preferences, conventions, constraints, or corrections mentioned\n\n' +
-  '## Open Questions\n' +
-  '- Questions still unresolved (if any)\n\n' +
-  '## Summary\n' +
-  '- 3-5 sentence summary of the conversation flow and outcomes\n\n' +
-  'IMPORTANT: output ONLY the structured summary above. Do not add greetings or commentary.';
-
 const MAX_DIFF_CHARS = 30000;
 const MAX_CODE_CHARS = 30000;
 const MAX_ATTACHMENT_CHARS = 100_000;
-
-export type ChatContextInfo = {
-  turns: number;
-  inputChars: number;
-  outputChars: number;
-  inputTokens: number;
-  outputTokens: number;
-  realInputTokens?: number;
-  realOutputTokens?: number;
-  cacheCreationInputTokens?: number;
-  cacheReadInputTokens?: number;
-  estimatedCostUsd?: number;
-  lastTurnInputTokens?: number;
-  lastTurnOutputTokens?: number;
-  lastTurnInputChars?: number;
-  lastTurnOutputChars?: number;
-  lastTurnCostUsd?: number;
-  imageCount: number;
-  source: string;
-  sourceTruncated: boolean;
-  attachments: string[];
-  selectedProviderId: string;
-  providerContextLimitTokens?: number;
-  providerContextUsedTokens: number;
-  providerContextRemainingTokens?: number;
-  providerContextUsagePercent?: number;
-  providerContextNearLimit: boolean;
-  providerContextIsEstimated: boolean;
-  providerContextIsCompacting: boolean;
-  providerContextLastCompactionAt?: number;
-  providerContextCompactThresholdPercent?: number;
-  providerContextShouldCompactSoon: boolean;
-  providerContextSummaryPresent: boolean;
-  availableProviders: Array<{
-    id: string;
-    displayName?: string;
-    model: string;
-    protocol: string;
-  }>;
-};
-
-export type ImagePayload = {
-  dataUrl: string; // "data:image/png;base64,..."
-  mediaType: string;
-  label: string;
-  sizeBytes: number;
-};
-
-export type ChatOutbound =
-  | { type: 'init'; sessionId: string; title: string; kind: SessionKind; file: string }
-  | {
-      type: 'message';
-      sessionId: string;
-      role: 'user';
-      text: string;
-      images?: ImagePayload[];
-    }
-  | { type: 'startAssistant'; sessionId: string }
-  | { type: 'streamChunk'; sessionId: string; text: string }
-  | { type: 'doneAssistant'; sessionId: string }
-  | { type: 'error'; sessionId: string; message: string }
-  | { type: 'attached'; sessionId: string; label: string }
-  | { type: 'context'; sessionId: string; info: ChatContextInfo }
-  | { type: 'toolUse'; sessionId: string; callId: string; name: string; input: unknown }
-  | { type: 'toolResult'; sessionId: string; callId: string; content: string; ok: boolean }
-  | {
-      type: 'approvalRequest';
-      sessionId: string;
-      approvalId: string;
-      callId?: string;
-      toolName: string;
-      summary: string;
-      detail?: string;
-    }
-  | { type: 'approvalCleared'; sessionId: string; approvalId: string }
-  | { type: 'pendingImage'; sessionId: string; image: ImagePayload }
-  | { type: 'titleUpdate'; sessionId: string; title: string }
-  | { type: 'rewindMessage'; sessionId: string }
-  | { type: 'resetMessages'; sessionId: string }
-  | { type: 'editUserMessage'; sessionId: string; index: number; text: string };
 
 export class ChatSession {
   readonly id: string;
@@ -1018,82 +871,7 @@ export class ChatSession {
     task: string,
     signal: AbortSignal,
   ): Promise<string> {
-    if (!provider.chatWithTools) {
-      throw new Error('Active provider does not support tools.');
-    }
-    const tools = getSubAgentToolDefs();
-    const subSystem =
-      'You are a research sub-agent. The main assistant has delegated a specific research task to you. ' +
-      'Available tools: read_file, grep, list_dir, find_files, git_log, get_open_tabs, get_selection, ' +
-      'find_symbol, goto_definition, find_references. Use them as needed. ' +
-      'Prefer find_symbol / goto_definition / find_references for semantic navigation (language-server backed).\n' +
-      'Goal: return a concise, accurate answer to the task. Cite file paths and line numbers when relevant. ' +
-      'Be efficient: stop when you have a clear answer. Your last message must contain ONLY the answer text (no further tool calls).';
-
-    const messages: ChatMessage[] = [
-      { role: 'system', content: subSystem },
-      { role: 'user', content: task },
-    ];
-    const SUB_MAX_ITERS = Math.max(3, Math.floor(getToolUseMaxIterations() / 2));
-    let lastText = '';
-
-    const subCtx: ToolExecutionContext = {
-      workspaceRoot: getWorkspaceRoot() ?? process.cwd(),
-      signal,
-      blacklist: getToolUseBlacklist(),
-      // Intentionally no runSubAgent here → block recursion.
-    };
-
-    log.info('subagent: start', { taskChars: task.length, maxIters: SUB_MAX_ITERS });
-
-    for (let iter = 0; iter < SUB_MAX_ITERS; iter++) {
-      if (signal.aborted) break;
-      const turnText: string[] = [];
-      const turnTools: ToolUseBlock[] = [];
-
-      for await (const event of provider.chatWithTools(
-        messages,
-        tools,
-        { maxTokens: 1500, temperature: 0.3 },
-        signal,
-      )) {
-        if (signal.aborted) break;
-        if (event.type === 'text') turnText.push(event.text);
-        else if (event.type === 'tool_use') {
-          turnTools.push({
-            type: 'tool_use',
-            id: event.id,
-            name: event.name,
-            input: event.input,
-          });
-        }
-      }
-
-      if (turnText.length > 0) lastText = turnText.join('');
-
-      const blocks: ChatContentBlock[] = [];
-      if (turnText.length > 0) blocks.push({ type: 'text', text: turnText.join('') });
-      blocks.push(...turnTools);
-      if (blocks.length > 0) messages.push({ role: 'assistant', content: blocks });
-
-      if (turnTools.length === 0 || signal.aborted) break;
-
-      const toolResults: ToolResultBlock[] = [];
-      for (const tu of turnTools) {
-        if (signal.aborted) break;
-        const result = await withAbort(executeTool(tu.name, tu.input, subCtx), signal);
-        toolResults.push({
-          type: 'tool_result',
-          tool_use_id: tu.id,
-          content: result.content,
-          is_error: result.isError,
-        });
-      }
-      if (toolResults.length > 0) messages.push({ role: 'user', content: toolResults });
-    }
-
-    log.info('subagent: done', { answerChars: lastText.length });
-    return lastText;
+    return runSubAgentImpl(provider, task, signal);
   }
 
   private async streamPlain(provider: LLMProvider, ctrl: AbortController): Promise<void> {
@@ -1223,8 +1001,7 @@ export class ChatSession {
           autoContinueCount++;
           this.messages.push({
             role: 'user',
-            content:
-              'Continue with the action you just announced. Call the tool now — do not narrate intent again, just execute.',
+            content: AUTO_CONTINUE_NUDGE,
           });
           log.info('auto-continue triggered', { count: autoContinueCount, tail: finalText.slice(-80) });
           continue;
@@ -1232,33 +1009,58 @@ export class ChatSession {
         break; // genuine final answer
       }
 
-      // Execute each tool, post result, append to history
+      // Execute tools: consecutive readonly tools run in parallel, write tools sequentially.
       const toolCtx = this.buildToolContext(ctrl.signal, provider);
       const toolResults: ToolResultBlock[] = [];
       let retryFilePath: string | null = null;
-      for (const tu of turnToolUses) {
+
+      const recordResult = (tu: ToolUseBlock, content: string, isError?: boolean): void => {
+        toolResults.push({ type: 'tool_result', tool_use_id: tu.id, content, is_error: isError });
+        this.post({
+          type: 'toolResult',
+          sessionId: this.id,
+          callId: tu.id,
+          content,
+          ok: !isError,
+        });
+      };
+
+      let i = 0;
+      while (i < turnToolUses.length) {
         if (ctrl.signal.aborted) break;
+
+        const batchStart = i;
+        while (i < turnToolUses.length && isToolReadonly(turnToolUses[i].name)) {
+          i++;
+        }
+        if (i > batchStart) {
+          const batch = turnToolUses.slice(batchStart, i);
+          const results = await Promise.all(
+            batch.map((tu) =>
+              withAbort(
+                executeTool(tu.name, tu.input, { ...toolCtx, callId: tu.id }),
+                ctrl.signal,
+              ),
+            ),
+          );
+          for (let j = 0; j < batch.length; j++) {
+            recordResult(batch[j], results[j].content, results[j].isError);
+          }
+          if (ctrl.signal.aborted) break;
+        }
+
+        if (i >= turnToolUses.length) break;
+
+        const tu = turnToolUses[i];
         const result = await withAbort(
           executeTool(tu.name, tu.input, { ...toolCtx, callId: tu.id }),
           ctrl.signal,
         );
         if (tu.name === 'write_memory' && !result.isError) {
-          // Refresh the in-prompt index so the next turn sees the new entry.
           await refreshMemoryPrompt();
         }
-        toolResults.push({
-          type: 'tool_result',
-          tool_use_id: tu.id,
-          content: result.content,
-          is_error: result.isError,
-        });
-        this.post({
-          type: 'toolResult',
-          sessionId: this.id,
-          callId: tu.id,
-          content: result.content,
-          ok: !result.isError,
-        });
+        recordResult(tu, result.content, result.isError);
+        i++;
 
         if (
           !editFileRetried &&
@@ -1303,7 +1105,7 @@ export class ChatSession {
     let chars = this.systemPrompt.length;
     for (const m of this.messages) {
       if (m.role === 'assistant') continue;
-      chars += this.computeMessageChars(m);
+      chars += computeMessageChars(m);
     }
     return chars;
   }
@@ -1312,20 +1114,9 @@ export class ChatSession {
     let chars = 0;
     for (const m of this.messages) {
       if (m.role !== 'assistant') continue;
-      chars += this.computeMessageChars(m);
+      chars += computeMessageChars(m);
     }
     return chars;
-  }
-
-  private computeMessageChars(m: ChatMessage): number {
-    if (typeof m.content === 'string') return m.content.length;
-    let total = 0;
-    for (const b of m.content) {
-      if (b.type === 'text') total += b.text.length;
-      else if (b.type === 'tool_result') total += b.content.length;
-      else if (b.type === 'tool_use') total += JSON.stringify(b.input ?? {}).length;
-    }
-    return total;
   }
 
   private getContextInfo(): ChatContextInfo {
@@ -1481,7 +1272,7 @@ export class ChatSession {
     afterTokens: number;
     aiSummary?: boolean;
   }> {
-    const beforeTokens = this.estimateMessagesTokens(this.messages);
+    const beforeTokens = estimateMessagesTokens(this.messages);
     if (this.messages.length <= 2 || beforeTokens <= maxRetainedTokens) {
       return {
         compacted: false,
@@ -1493,7 +1284,7 @@ export class ChatSession {
       };
     }
 
-    const safeCutPoints = this.computeSafeCutPoints();
+    const safeCutPoints = computeSafeCutPoints(this.messages);
     if (safeCutPoints.length === 0) {
       return {
         compacted: false,
@@ -1508,7 +1299,7 @@ export class ChatSession {
     let chosenCut = safeCutPoints[0];
     for (const cut of safeCutPoints) {
       const retained = this.messages.slice(cut);
-      const retainedTokens = this.estimateMessagesTokens(retained);
+      const retainedTokens = estimateMessagesTokens(retained);
       if (retainedTokens <= targetRetainedTokens) {
         chosenCut = cut;
         break;
@@ -1539,17 +1330,17 @@ export class ChatSession {
         summary = await this.buildAISummary(dropped, provider);
         aiSummary = true;
       } catch {
-        summary = this.buildCompactionSummary(dropped);
+        summary = buildCompactionSummary(dropped);
       }
     } else {
-      summary = this.buildCompactionSummary(dropped);
+      summary = buildCompactionSummary(dropped);
     }
     const summaryMessage: ChatMessage = {
       role: 'user',
       content: `Context summary so far:\n\n${summary || '(no summary available)'}`,
     };
     this.messages = [summaryMessage, ...kept];
-    const afterTokens = this.estimateMessagesTokens(this.messages);
+    const afterTokens = estimateMessagesTokens(this.messages);
     return {
       compacted: true,
       summary,
@@ -1559,55 +1350,6 @@ export class ChatSession {
       afterTokens,
       aiSummary,
     };
-  }
-
-  private computeSafeCutPoints(): number[] {
-    const points = new Set<number>();
-    for (let i = 1; i < this.messages.length; i++) {
-      const prev = this.messages[i - 1];
-      const curr = this.messages[i];
-      if (prev.role === 'user' && curr.role === 'assistant') points.add(i - 1);
-      if (prev.role === 'assistant' && curr.role === 'user') points.add(i);
-    }
-    points.add(0);
-    points.delete(this.messages.length);
-    return [...points]
-      .filter((n) => n >= 0 && n < this.messages.length)
-      .sort((a, b) => a - b);
-  }
-
-  private estimateMessagesTokens(messages: ChatMessage[]): number {
-    return messages.reduce((sum, msg) => sum + this.estimateMessageTokens(msg), 0);
-  }
-
-  private estimateMessageTokens(msg: ChatMessage): number {
-    if (typeof msg.content === 'string') {
-      return Math.max(1, Math.ceil(msg.content.length / 4));
-    }
-    let total = 0;
-    for (const b of msg.content) {
-      if (b.type === 'text') {
-        total += Math.ceil(b.text.length / 4);
-      } else if (b.type === 'tool_result') {
-        total += Math.ceil(b.content.length / 4);
-      } else if (b.type === 'tool_use') {
-        total += Math.ceil(JSON.stringify(b.input ?? {}).length / 4);
-      } else if (b.type === 'image') {
-        total += 1500;
-      }
-    }
-    return Math.max(1, total);
-  }
-
-  private buildCompactionSummary(droppedMessages: ChatMessage[]): string {
-    const parts: string[] = [];
-    for (const msg of droppedMessages) {
-      const text = extractTextContent(msg.content).trim();
-      if (!text) continue;
-      const label = msg.role === 'assistant' ? 'Assistant' : 'User';
-      parts.push(`${label}: ${text.slice(0, 400)}`);
-    }
-    return parts.join('\n\n');
   }
 
   /**
@@ -1628,7 +1370,7 @@ export class ChatSession {
       transcriptParts.push(`### ${label}\n${text.slice(0, 2000)}`);
     }
     const transcript = transcriptParts.join('\n\n');
-    if (!transcript.trim()) return this.buildCompactionSummary(droppedMessages);
+    if (!transcript.trim()) return buildCompactionSummary(droppedMessages);
 
     const compactionMessages: ChatMessage[] = [
       { role: 'system', content: COMPACT_SUMMARY_PROMPT },
@@ -1657,136 +1399,10 @@ export class ChatSession {
       log.warn('ai compaction summary failed, falling back to manual');
     }
     // Fallback to manual summary.
-    return this.buildCompactionSummary(droppedMessages);
+    return buildCompactionSummary(droppedMessages);
   }
 
   private post(msg: ChatOutbound): void {
     this.postFn(msg);
   }
-}
-
-const IMAGE_MEDIA_TYPES: Record<string, ImageMediaType> = {
-  'image/png': 'image/png',
-  'image/jpeg': 'image/jpeg',
-  'image/jpg': 'image/jpeg',
-  'image/gif': 'image/gif',
-  'image/webp': 'image/webp',
-};
-
-function dataUrlToImageBlock(dataUrl: string, mediaType: string): ImageBlock | null {
-  const normalized = IMAGE_MEDIA_TYPES[mediaType.toLowerCase()] ?? null;
-  if (!normalized) {
-    log.warn('attach image: unsupported media type', { mediaType });
-    return null;
-  }
-  // dataUrl: "data:image/png;base64,iVBORw..." → strip prefix
-  const commaIdx = dataUrl.indexOf(',');
-  const data = commaIdx >= 0 ? dataUrl.slice(commaIdx + 1) : dataUrl;
-  return {
-    type: 'image',
-    source: { type: 'base64', media_type: normalized, data },
-  };
-}
-
-function deriveTitleFromMessage(text: string): string {
-  const cleaned = text.replace(/\s+/g, ' ').trim();
-  return cleaned.length > 50 ? cleaned.slice(0, 50) + '…' : cleaned;
-}
-
-function extractTextContent(content: string | ChatContentBlock[]): string {
-  if (typeof content === 'string') return content;
-  return content
-    .map((b) => (b.type === 'text' ? b.text : ''))
-    .filter(Boolean)
-    .join('\n');
-}
-
-function stripImagesFromMessages(messages: ChatMessage[]): ChatMessage[] {
-  return messages.map((m) => {
-    if (typeof m.content === 'string') return { ...m };
-    const blocks: ChatContentBlock[] = [];
-    for (const b of m.content) {
-      if (b.type === 'image') {
-        blocks.push({ type: 'text', text: '[image stripped from history]' });
-      } else {
-        blocks.push(b);
-      }
-    }
-    return { ...m, content: blocks };
-  });
-}
-
-function langInstruction(): string {
-  const language = getOutputLanguage();
-  if (!language || language === 'English') return '';
-  return `\n\nIMPORTANT: write your responses in ${language}. Keep code snippets, identifiers, and file paths verbatim.`;
-}
-
-function skillsInstruction(): string {
-  const mgr = getSkillManager();
-  return mgr?.buildSystemPromptAddition() ?? '';
-}
-
-// Memory index is built once and refreshed when a write_memory tool fires.
-// Stored at module scope so concurrent sessions share the same cache.
-let memoryPromptCache = '';
-let memoryPromptLoaded = false;
-
-async function ensureMemoryPromptLoaded(): Promise<void> {
-  if (memoryPromptLoaded) return;
-  memoryPromptLoaded = true;
-  try {
-    memoryPromptCache = await buildMemoryPromptSection();
-  } catch (err) {
-    log.warn('memory prompt load failed', err);
-    memoryPromptCache = '';
-  }
-}
-
-export async function refreshMemoryPrompt(): Promise<void> {
-  memoryPromptLoaded = true;
-  try {
-    memoryPromptCache = await buildMemoryPromptSection();
-  } catch (err) {
-    log.warn('memory prompt refresh failed', err);
-  }
-}
-
-function memorySectionAffix(): string {
-  return memoryPromptCache ? '\n\n' + memoryPromptCache : '';
-}
-
-/**
- * Heuristic for Claude's "narrate-then-stop" failure mode. Uses only
- * language-agnostic signals (punctuation + structure) so it works for any
- * locale the user writes in.
- *
- * Triggers when the assistant ended its turn with:
- *  - empty/whitespace-only text (and no tool_use elsewhere — checked by caller)
- *  - a trailing introductory punctuation: ":", "：", "…", "..."
- *  - a trailing arrow like "→" / "->" / "=>" used to introduce the next step
- *
- * Anything ending with "." "!" "?" or a closing quote is treated as a genuine
- * final answer and is NOT auto-continued.
- */
-function looksLikeIntentWithoutAction(text: string): boolean {
-  const trimmed = text.trim();
-  if (trimmed.length === 0) return true;
-  if (/[:：…]$/.test(trimmed)) return true;
-  if (trimmed.endsWith('...')) return true;
-  if (/(?:→|->|=>)\s*$/.test(trimmed)) return true;
-  return false;
-}
-
-/** Race a promise against an AbortSignal — rejects if the signal fires first. */
-function withAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) return Promise.reject(new DOMException('Aborted', 'AbortError'));
-  return new Promise((resolve, reject) => {
-    const onAbort = () => reject(new DOMException('Aborted', 'AbortError'));
-    signal.addEventListener('abort', onAbort, { once: true });
-    promise.then(
-      (v) => { signal.removeEventListener('abort', onAbort); resolve(v); },
-      (e) => { signal.removeEventListener('abort', onAbort); reject(e); },
-    );
-  });
 }

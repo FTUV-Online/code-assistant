@@ -4,6 +4,7 @@ import type { Tool } from './types';
 type Input = { name?: string };
 
 export const readMemoryTool: Tool = {
+  readonly: true,
   def: {
     name: 'read_memory',
     description:

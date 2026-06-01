@@ -11,6 +11,7 @@ const DEFAULT_LIMIT = 20;
 const HARD_MAX = 100;
 
 export const gitLogTool: Tool = {
+  readonly: true,
   def: {
     name: 'git_log',
     description:

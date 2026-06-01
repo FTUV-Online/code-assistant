@@ -7,6 +7,7 @@ const MAX_ENTRIES = 200;
 type Input = { path?: string };
 
 export const listDirTool: Tool = {
+  readonly: true,
   def: {
     name: 'list_dir',
     description:

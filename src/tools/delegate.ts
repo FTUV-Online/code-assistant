@@ -4,6 +4,7 @@ import type { Tool } from './types';
 type Input = { task?: string };
 
 export const delegateResearchTool: Tool = {
+  readonly: true,
   def: {
     name: 'delegate_research',
     description:
