@@ -64,6 +64,7 @@ import {
   langInstruction,
   skillsInstruction,
 } from './chat/prompts';
+import { getEditInstructions } from './chat/editPrompts';
 import { runSubAgent as runSubAgentImpl } from './chat/subAgent';
 import type {
   ChatContextInfo as ChatContextInfoImported,
@@ -121,6 +122,47 @@ function buildEditRetryMessage(relPath: string, content: string): string {
   );
 }
 
+/**
+ * Build a smarter retry message that includes previous error context,
+ * progressively narrowing the content sent.
+ */
+function buildEditRetryMessageV2(
+  relPath: string,
+  content: string,
+  retryCount: number,
+  lastError: string,
+): string {
+  const lines = content.split('\n');
+  const maxRetryLines = [500, 200, 80]; // progressive narrowing
+
+  if (retryCount === 0) {
+    // First retry: full content, error context
+    return (
+      `The edit_file call failed with: "${lastError}". ` +
+      `Retry using the latest contents of \`${relPath}\` below. ` +
+      `Copy the exact find strings from the file below — preserve leading whitespace and do not repeat the previous failing edit.\n\n` +
+      `\`\`\`\n${content}\n\`\`\``
+    );
+  }
+
+  // Subsequent retries: truncated content
+  const maxLines = retryCount <= maxRetryLines.length
+    ? maxRetryLines[retryCount - 1]
+    : maxRetryLines[maxRetryLines.length - 1];
+
+  const truncated = lines.length > maxLines
+    ? lines.slice(0, maxLines).join('\n') + '\n... [file truncated, ' + lines.length + ' lines total]'
+    : content;
+
+  return (
+    `The edit_file retry also failed: "${lastError}". ` +
+    `Below is an excerpt of \`${relPath}\` (${Math.min(lines.length, maxLines)} of ${lines.length} lines). ` +
+    `Make sure the "find" text you use is copy-pasted exactly from this file content. ` +
+    `If the line you need is outside this excerpt, use read_file to get the exact text first.\n\n` +
+    `\`\`\`\n${truncated}\n\`\`\``
+  );
+}
+
 const MAX_DIFF_CHARS = 30000;
 const MAX_CODE_CHARS = 30000;
 const MAX_ATTACHMENT_CHARS = 100_000;
@@ -139,6 +181,10 @@ export class ChatSession {
   private attachments: string[] = [];
   private selectedProviderId = '';
   private currentAbort: AbortController | null = null;
+  /** Track edit_file / multi_edit calls for context pressure warnings. */
+  private editCallCount = 0;
+  private contextWarningSent = false;
+  private compactWarningSent = false;
   private pendingApprovals = new Map<
     string,
     {
@@ -261,8 +307,11 @@ export class ChatSession {
       rewrite: CODE_REWRITE_PROMPT,
     };
     const codeKind = this.kind as CodeAnalysisKind;
-    this.systemPrompt =
-      (promptByKind[codeKind] ?? CHAT_SYSTEM_PROMPT) + langInstruction() + skillsInstruction();
+    const basePrompt = promptByKind[codeKind] ?? CHAT_SYSTEM_PROMPT;
+    this.systemPrompt = basePrompt + langInstruction() + skillsInstruction();
+    if (codeKind !== 'rewrite') {
+      this.systemPrompt += '\n\n' + getEditInstructions(this.getModelName());
+    }
 
     this.attachments = [];
     this.source = `selection (${rangeLabel})`;
@@ -300,9 +349,22 @@ export class ChatSession {
     await this.streamReply();
   }
 
+  /** Get the model name from the selected provider config. */
+  private getModelName(): string {
+    const configs = getProviderConfigs();
+    const id = this.selectedProviderId || getActiveProviderId();
+    const cfg = configs.find((c) => c.id === id);
+    return cfg?.model ?? '';
+  }
+
   startChat(): void {
     this.cancelStream();
-    this.systemPrompt = CHAT_SYSTEM_PROMPT + langInstruction() + skillsInstruction();
+    this.editCallCount = 0;
+    this.contextWarningSent = false;
+    this.compactWarningSent = false;
+    const editInstr = getEditInstructions(this.getModelName());
+    this.systemPrompt =
+      CHAT_SYSTEM_PROMPT + langInstruction() + skillsInstruction() + '\n\n' + editInstr;
     this.source = '';
     this.sourceTruncated = false;
     this.attachments = [];
@@ -927,6 +989,8 @@ export class ChatSession {
     const MAX_AUTO_CONTINUE = 2;
     let autoContinueCount = 0;
     let editFileRetried = false;
+    let editRetryCount = 0;
+    let lastEditError = '';
     await ensureMemoryPromptLoaded();
 
     for (let iter = 0; iter < maxIters; iter++) {
@@ -1023,6 +1087,9 @@ export class ChatSession {
           content,
           ok: !isError,
         });
+        if (tu.name === 'edit_file' || tu.name === 'multi_edit' || tu.name === 'write_file') {
+          this.editCallCount++;
+        }
       };
 
       let i = 0;
@@ -1063,12 +1130,13 @@ export class ChatSession {
         i++;
 
         if (
-          !editFileRetried &&
           getEditFileAutoRetry() &&
           tu.name === 'edit_file' &&
           result.isError &&
-          isRetryableEditMatchError(result.content)
+          isRetryableEditMatchError(result.content) &&
+          editRetryCount < 3 // max 3 retries
         ) {
+          lastEditError = result.content;
           const input = (tu.input ?? {}) as { path?: unknown };
           if (typeof input.path === 'string' && input.path.length > 0) {
             retryFilePath = input.path;
@@ -1079,14 +1147,36 @@ export class ChatSession {
       if (toolResults.length > 0) {
         this.messages.push({ role: 'user', content: toolResults });
       }
+
+      // Context pressure warning: when nearing the limit and many edits done
+      if (
+        !this.contextWarningSent &&
+        this.editCallCount >= 3 &&
+        toolResults.length > 0 &&
+        this.getContextInfo().providerContextNearLimit
+      ) {
+        this.contextWarningSent = true;
+        this.messages.push({
+          role: 'user',
+          content:
+            'Warning: this session is approaching its context window limit due to the edit history. ' +
+            'Further edits may be unreliable. Consider starting a new chat or asking me to summarize ' +
+            'and continue in a fresh session.',
+        });
+        this.postContext();
+      }
+
       if (retryFilePath) {
         const freshContent = await readFreshRetryFile(retryFilePath, toolCtx.workspaceRoot);
         if (freshContent !== null) {
           editFileRetried = true;
           this.messages.push({
             role: 'user',
-            content: buildEditRetryMessage(retryFilePath, freshContent),
+            content: editRetryCount === 0
+              ? buildEditRetryMessage(retryFilePath, freshContent)
+              : buildEditRetryMessageV2(retryFilePath, freshContent, editRetryCount, lastEditError),
           });
+          editRetryCount++;
           this.postContext();
           continue;
         }

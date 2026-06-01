@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { getShowDiffPreview } from '../config/settings';
 import { isBinary, matchesAnyGlob, resolveSafePath } from './common';
 import { isSessionApproved, requestToolApproval } from './confirmation';
-import { showDiffPreview } from './diffPreview';
+import { openMultiFileDiff } from './diffPreview';
 import { applyEdits, type FindReplace } from './editLogic';
 import type { Tool } from './types';
 
@@ -156,12 +156,15 @@ export const multiEditTool: Tool = {
     const wantDiff = !isSessionApproved('multi_edit') && getShowDiffPreview();
     const closers: Array<() => Promise<void>> = [];
     if (wantDiff) {
-      for (const p of prepared) {
-        const close = await showDiffPreview({
+      for (let i = 0; i < prepared.length; i++) {
+        const p = prepared[i];
+        const isLast = i === prepared.length - 1;
+        const close = await openMultiFileDiff({
           relPath: p.relPath,
           original: p.original,
           proposed: p.proposed,
           isNewFile: false,
+          isLast,
         });
         if (close) closers.push(close);
       }
